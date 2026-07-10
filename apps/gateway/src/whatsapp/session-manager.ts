@@ -92,19 +92,27 @@ export class SessionManager {
   }
 
   /**
-   * Disconnects and removes a session.
+   * Disconnects and removes a session, also deletes persisted files.
    */
   async disconnectSession(sessionId: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
-
-    try {
-      await session.socket.logout();
-    } catch {
-      // Ignore errors during logout — socket may already be closed
+    if (session) {
+      try {
+        await session.socket.logout();
+      } catch {
+        // Ignore errors during logout — socket may already be closed
+      }
+      this.sessions.delete(sessionId);
     }
 
-    this.sessions.delete(sessionId);
+    // Delete persisted session files from disk
+    try {
+      const sessionDir = path.join(this.sessionStorePath, sessionId);
+      await fs.rm(sessionDir, { recursive: true, force: true });
+    } catch {
+      // Ignore if directory doesn't exist
+    }
+
     this.eventHandlers.onStatusChange?.(sessionId, 'disconnected');
   }
 

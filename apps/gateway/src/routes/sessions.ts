@@ -241,10 +241,8 @@ export async function sessionRoutes(
 
     const session = app.sessionManager.getSession(id);
     if (!session) {
-      return reply.status(404).send({
-        error: 'Not Found',
-        message: `Session '${id}' does not exist`,
-      });
+      // Try to disconnect by session key anyway, return 200
+      return reply.send({ session_id: id, status: 'disconnected' });
     }
 
     await app.sessionManager.disconnectSession(id);

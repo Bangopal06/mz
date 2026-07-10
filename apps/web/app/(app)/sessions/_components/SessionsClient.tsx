@@ -132,6 +132,11 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
 
   async function handleDelete(id: string) {
     const supabase = createClient();
+    // First disconnect from gateway
+    const session = sessions.find((s) => s.id === id);
+    if (session) {
+      await fetch(`/api/gateway/sessions/${encodeURIComponent(session.session_key)}/disconnect`, { method: 'POST' }).catch(() => {});
+    }
     await supabase.from('wa_sessions').delete().eq('id', id);
     setSessions((prev) => prev.filter((s) => s.id !== id));
     setDeleteConfirm(null);
