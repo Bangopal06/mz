@@ -1,11 +1,12 @@
+import crypto from 'crypto';
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import { z } from 'zod';
 import type { AppConfig } from '../config/index.js';
 
 const SendMessageSchema = z.object({
-  session_id: z.string().uuid(),
-  to: z.string().regex(/^62\d{8,13}$/, 'Invalid WA number format (must start with 62)'),
-  message: z.string().min(1),
+  session_id: z.string().min(1),
+  to: z.string().regex(/^[0-9]{8,20}$/, 'Invalid WA number format'),
+  message: z.string().min(1).optional(),
   media: z
     .object({
       url: z.string().url(),
@@ -13,6 +14,8 @@ const SendMessageSchema = z.object({
       caption: z.string().optional(),
     })
     .optional(),
+}).refine((d) => d.message || d.media, {
+  message: 'Either message or media is required',
 });
 
 /** Options passed when registering this plugin. */
@@ -219,7 +222,7 @@ export async function sendRoutes(app: FastifyInstance, options: SendRoutesOption
     // ── 4. Update session activity (fire-and-forget, Requirement 8.5) ─────────
     void updateSessionActivity(config.supabase.url, config.supabase.serviceRoleKey, session_id);
 
-    // ── 5. Return ACK ─────────────────────────────────────────────────────────
+    // ── 6. Return ACK ─────────────────────────────────────────────────────────
     const messageId = sentMessage?.key?.id ?? crypto.randomUUID();
     const timestamp = new Date().toISOString();
 

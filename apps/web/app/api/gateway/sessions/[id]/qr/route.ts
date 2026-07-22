@@ -21,6 +21,11 @@ export async function GET(
   }
 
   const { id } = await params;
+  // Forward dbId query param to gateway so it can link contacts to this session
+  const dbId = request.nextUrl.searchParams.get('dbId');
+  const gatewayQrUrl = dbId
+    ? `${GATEWAY_URL}/sessions/${encodeURIComponent(id)}/qr?dbId=${encodeURIComponent(dbId)}`
+    : `${GATEWAY_URL}/sessions/${encodeURIComponent(id)}/qr`;
 
   const encoder = new TextEncoder();
 
@@ -30,12 +35,13 @@ export async function GET(
 
       try {
         gatewayRes = await fetch(
-          `${GATEWAY_URL}/sessions/${encodeURIComponent(id)}/qr`,
+          gatewayQrUrl,
           {
             headers: {
               'x-api-key': GATEWAY_API_KEY,
               'Accept': 'text/event-stream',
               'Cache-Control': 'no-cache',
+              'ngrok-skip-browser-warning': 'true',
             },
             signal: request.signal,
           }
@@ -47,7 +53,17 @@ export async function GET(
       }
 
       if (!gatewayRes.ok || !gatewayRes.body) {
-        controller.enqueue(encoder.encode(`data: {"error":"GATEWAY_ERROR","status":${gatewayRes.status}}\n\n`));
+        // Try to read gateway error body for better diagnostics
+        let detail = '';
+        try {
+          detail = await gatewayRes.text();
+        } catch { /* ignore */ }
+        console.error(`[QR Route] Gateway error ${gatewayRes.status} for session "${id}": ${detail}`);
+        controller.enqueue(
+          encoder.encode(
+            `data: {"error":"GATEWAY_ERROR","status":${gatewayRes.status},"detail":${JSON.stringify(detail.slice(0, 200))}}\n\n`
+          )
+        );
         controller.close();
         return;
       }

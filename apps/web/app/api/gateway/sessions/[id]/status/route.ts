@@ -16,7 +16,7 @@ export async function GET(
 
   try {
     const res = await fetch(`${GATEWAY_URL}/sessions`, {
-      headers: { 'x-api-key': GATEWAY_API_KEY },
+      headers: { 'x-api-key': GATEWAY_API_KEY, 'ngrok-skip-browser-warning': 'true' },
     });
     if (!res.ok) return NextResponse.json({ status: 'unknown' });
     const data = await res.json() as { sessions: { id: string; status: string; phone_number?: string; display_name?: string }[] };

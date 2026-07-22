@@ -539,6 +539,46 @@ export type Database = {
         };
         Relationships: [];
       };
+      chat_messages: {
+        Row: {
+          id: string;
+          wa_session_id: string;
+          contact_wa_number: string;
+          direction: 'inbound' | 'outbound';
+          message_type: 'text' | 'image';
+          body: string | null;
+          media_url: string | null;
+          wa_message_id: string | null;
+          status: 'received' | 'sent' | 'delivered' | 'read' | 'failed';
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          wa_session_id: string;
+          contact_wa_number: string;
+          direction: 'inbound' | 'outbound';
+          message_type: 'text' | 'image';
+          body?: string | null;
+          media_url?: string | null;
+          wa_message_id?: string | null;
+          status: 'received' | 'sent' | 'delivered' | 'read' | 'failed';
+          created_at?: string;
+        };
+        Update: {
+          status?: 'received' | 'sent' | 'delivered' | 'read' | 'failed';
+          body?: string | null;
+          media_url?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'chat_messages_wa_session_id_fkey';
+            columns: ['wa_session_id'];
+            isOneToOne: false;
+            referencedRelation: 'wa_sessions';
+            referencedColumns: ['id'];
+          }
+        ];
+      };
     };
     Views: { [_ in never]: never };
     Functions: { [_ in never]: never };

@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
   try {
     await fetch(`${GATEWAY_URL}/jobs/enqueue`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': GATEWAY_API_KEY },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': GATEWAY_API_KEY, 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({
         broadcast_id: body.broadcast_id,
         session_id: body.session_id,

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import type { AppConfig } from '../config/index.js';
+import { handleIncomingMessage } from '../whatsapp/auto-reply.js';
 
 /** Options passed when registering this plugin. */
 export interface SessionRoutesOptions extends FastifyPluginOptions {
@@ -27,6 +28,7 @@ function buildHmacSignature(secret: string, body: string): string {
 async function notifyWebhook(
   webhookUrl: string,
   hmacSecret: string,
+  supabaseAnonKey: string,
   payload: {
     session_id: string;
     status: string;
@@ -43,13 +45,17 @@ async function notifyWebhook(
       headers: {
         'Content-Type': 'application/json',
         'X-Gateway-Signature': signature,
+        // Supabase Edge Functions require either anon key or service role key
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey,
       },
       body,
     });
 
     if (!res.ok) {
+      const errText = await res.text().catch(() => '');
       console.warn(
-        `[SessionRoutes] Webhook responded ${res.status} for session ${payload.session_id}`
+        `[SessionRoutes] Webhook responded ${res.status} for session ${payload.session_id}: ${errText}`
       );
     }
   } catch (err) {
@@ -70,19 +76,61 @@ export async function sessionRoutes(
 ): Promise<void> {
   const { config } = options;
   const { gatewayWebhookUrl, webhookHmacSecret } = config;
+  const supabaseAnonKey = config.supabase.anonKey;
 
-  // ── Wire up session-manager event handlers so every status change is
-  //    forwarded to Supabase via the webhook callback. ─────────────────────────
-  app.sessionManager.setEventHandlers({
-    onStatusChange: (sessionId, status) => {
+  // Helper to call notifyWebhook with config baked in
+  const notify = (payload: {
+    session_id: string;
+    status: string;
+    phone_number?: string | null;
+    display_name?: string | null;
+  }) => notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, supabaseAnonKey, payload);
+
+  // ── Shared onMessage handler (always active, survives SSE overrides) ─────────
+  const sharedOnMessage = (sessionId: string, event: unknown) => {
+    const { messages, type } = event as { messages: { key: { fromMe?: boolean; remoteJid?: string; id?: string }; message?: { conversation?: string; extendedTextMessage?: { text?: string }; imageMessage?: { mimetype?: string } } }[]; type: string };
+    if (type !== 'notify' && type !== 'append') return;
+    for (const msg of messages ?? []) {
+      if (msg.key.fromMe) continue;
+      const rawJid = msg.key.remoteJid ?? '';
+      if (!rawJid) continue;
+      // Skip groups, broadcasts (termasuk status@broadcast), dan @lid
+      if (rawJid.endsWith('@g.us') || rawJid.endsWith('@broadcast') || rawJid.endsWith('@lid')) continue;
+      // Normalize JID: strip device suffix "number:deviceId@domain" → "number@domain"
+      const from = rawJid.includes(':') && rawJid.endsWith('@s.whatsapp.net')
+        ? rawJid.replace(/:\d+@/, '@')
+        : rawJid;
+
+      const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
+      const sessionInfo = app.sessionManager.getSession(sessionId);
+      if (!sessionInfo) continue;
+
+      // Pass sessionDbId (UUID from wa_sessions) and rawMessage for chat_messages save
+      void handleIncomingMessage(
+        { url: config.supabase.url, serviceRoleKey: config.supabase.serviceRoleKey },
+        config.gatewayWebhookUrl, config.gatewayApiKey, sessionId, from, text,
+        async (to: string, message: string) => {
+          const jid = `${to}@s.whatsapp.net`;
+          await sessionInfo.socket.sendMessage(jid, { text: message });
+        },
+        sessionInfo.dbId,
+        msg
+      );
+    }
+  };
+
+  // ── Shared base handlers (status + message) ───────────────────────────────
+  const baseHandlers = () => ({
+    onStatusChange: (sessionId: string, status: string) => {
       const session = app.sessionManager.getSession(sessionId);
-      void notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, {
-        session_id: sessionId,
-        status,
-        phone_number: session?.phoneNumber ?? null,
-        display_name: session?.displayName ?? null,
-      });
+      void notify({ session_id: sessionId, status, phone_number: session?.phoneNumber ?? null, display_name: session?.displayName ?? null });
     },
+    onMessage: sharedOnMessage,
+  });
+
+  // ── Wire up session-manager event handlers ────────────────────────────────
+  app.sessionManager.setEventHandlers({
+    ...baseHandlers(),
   });
 
   // ── GET /sessions ────────────────────────────────────────────────────────────
@@ -105,8 +153,10 @@ export async function sessionRoutes(
   //   data: {"session_id":"...","status":"connected"}
   //
   // The stream closes automatically after 60 s or when the session connects.
-  app.get<{ Params: { id: string } }>('/:id/qr', async (request, reply) => {
+  // Query param: dbId — the Supabase UUID for this session (used for contact sync)
+  app.get<{ Params: { id: string }; Querystring: { dbId?: string } }>('/:id/qr', async (request, reply) => {
     const { id } = request.params;
+    const { dbId } = request.query;
 
     // Set SSE headers — send raw reply without Fastify serialisation
     reply.hijack();
@@ -126,7 +176,10 @@ export async function sessionRoutes(
     // Ensure session exists (creates it if necessary)
     let session = app.sessionManager.getSession(id);
     if (!session) {
-      session = await app.sessionManager.createSession(id);
+      session = await app.sessionManager.createSession(id, dbId);
+    } else if (dbId && !session.dbId) {
+      // Attach DB UUID if it wasn't set during restore
+      session.dbId = dbId;
     }
 
     // If already connected, send one status event and close immediately
@@ -149,43 +202,22 @@ export async function sessionRoutes(
       if (finished) return;
       finished = true;
       clearTimeout(timeoutHandle);
-      app.sessionManager.setEventHandlers({
-        onStatusChange: (sid, st) => {
-          const s = app.sessionManager.getSession(sid);
-          void notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, {
-            session_id: sid,
-            status: st,
-            phone_number: s?.phoneNumber ?? null,
-            display_name: s?.displayName ?? null,
-          });
-        },
-      });
+      // Restore global handlers
+      app.sessionManager.setEventHandlers({ ...baseHandlers() });
       sendEvent('done', { session_id: id, status });
       res.end();
     };
 
-    // Override event handlers for the duration of this SSE connection so we
-    // can forward QR updates and status changes to *this* HTTP response.
+    // Override event handlers for the duration of this SSE connection
     app.sessionManager.setEventHandlers({
+      ...baseHandlers(),
       onStatusChange: (sessionId, status) => {
-        // Always propagate to Supabase
         const s = app.sessionManager.getSession(sessionId);
-        void notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, {
-          session_id: sessionId,
-          status,
-          phone_number: s?.phoneNumber ?? null,
-          display_name: s?.displayName ?? null,
-        });
-
+        void notify({ session_id: sessionId, status, phone_number: s?.phoneNumber ?? null, display_name: s?.displayName ?? null });
         if (sessionId !== id) return;
-
         sendEvent('status', { session_id: id, status });
-
-        if (status === 'connected') {
-          finish('connected');
-        } else if (status === 'disconnected') {
-          finish('disconnected');
-        }
+        if (status === 'connected') finish('connected');
+        else if (status === 'disconnected') finish('disconnected');
       },
       onQrCode: (sessionId, qr) => {
         if (sessionId !== id) return;
@@ -193,44 +225,20 @@ export async function sessionRoutes(
       },
     });
 
-    // Auto-close after 60 s
     const timeoutHandle = setTimeout(() => {
       if (!finished) {
         finished = true;
         sendEvent('done', { session_id: id, status: 'timeout' });
         res.end();
-        // Restore global handlers after SSE stream expires
-        app.sessionManager.setEventHandlers({
-          onStatusChange: (sid, st) => {
-            const s = app.sessionManager.getSession(sid);
-            void notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, {
-              session_id: sid,
-              status: st,
-              phone_number: s?.phoneNumber ?? null,
-              display_name: s?.displayName ?? null,
-            });
-          },
-        });
+        app.sessionManager.setEventHandlers({ ...baseHandlers() });
       }
     }, QR_STREAM_TIMEOUT_MS);
 
-    // Cleanup if the client disconnects early
     request.socket.on('close', () => {
       if (!finished) {
         finished = true;
         clearTimeout(timeoutHandle);
-        // Restore the global webhook-only handler
-        app.sessionManager.setEventHandlers({
-          onStatusChange: (sid, st) => {
-            const s = app.sessionManager.getSession(sid);
-            void notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, {
-              session_id: sid,
-              status: st,
-              phone_number: s?.phoneNumber ?? null,
-              display_name: s?.displayName ?? null,
-            });
-          },
-        });
+        app.sessionManager.setEventHandlers({ ...baseHandlers() });
       }
     });
   });
@@ -241,12 +249,21 @@ export async function sessionRoutes(
 
     const session = app.sessionManager.getSession(id);
     if (!session) {
-      // Try to disconnect by session key anyway, return 200
-      return reply.send({ session_id: id, status: 'disconnected' });
+      return reply.status(404).send({ error: 'Not Found', message: `Session '${id}' not found` });
     }
 
     await app.sessionManager.disconnectSession(id);
 
     return reply.send({ session_id: id, status: 'disconnected' });
+  });
+
+  // ── DELETE /sessions/:id — permanently delete session + disk files ───────────
+  app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const { id } = request.params;
+    const { permanent } = request.query as { permanent?: string };
+    // permanent=false → disconnect only (clear memory+disk but allow reconnect)
+    // permanent=true (default) → add to deletedSessions to prevent reconnect
+    await app.sessionManager.deleteSession(id, permanent !== 'false');
+    return reply.send({ session_id: id, deleted: true });
   });
 }

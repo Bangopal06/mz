@@ -19,6 +19,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const closedRef = useRef(false);
   const connectedRef = useRef(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     closedRef.current = false;
@@ -66,7 +67,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
     async function connectSSE() {
       try {
         const res = await fetch(
-          `/api/gateway/sessions/${encodeURIComponent(sessionId)}/qr`,
+          `/api/gateway/sessions/${encodeURIComponent(sessionId)}/qr?dbId=${encodeURIComponent(sessionDbId)}`,
           { signal: controller.signal, headers: { Accept: 'text/event-stream' } }
         );
 
@@ -106,10 +107,21 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
                 await handleConnectedEvent();
                 return;
               } else if (payload['error']) {
+                const errCode = payload['error'] as string;
+                let msg = `Error: ${errCode}`;
+                if (errCode === 'GATEWAY_UNREACHABLE') {
+                  msg = 'Tidak dapat terhubung ke WhatsApp Gateway. Pastikan gateway sedang berjalan.';
+                } else if (errCode === 'GATEWAY_ERROR') {
+                  const status = payload['status'];
+                  const detail = payload['detail'];
+                  if (status === 404) {
+                    msg = `Sesi tidak ditemukan di gateway. Coba buat sesi baru.`;
+                  } else {
+                    msg = `Gateway error (${status ?? errCode})${detail ? ': ' + String(detail).slice(0, 100) : ''}.`;
+                  }
+                }
                 setQrStatus('error');
-                setErrorMessage(payload['error'] === 'GATEWAY_UNREACHABLE'
-                  ? 'Tidak dapat terhubung ke WhatsApp Gateway.'
-                  : `Error: ${payload['error']}`);
+                setErrorMessage(msg);
                 reader.releaseLock();
                 return;
               }
@@ -135,7 +147,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
       controller.abort();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, retryCount]);
 
   function handleClose() { closedRef.current = true; onClose(); }
 
@@ -206,7 +218,17 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
 
         <div className="flex gap-2 pt-1">
           {qrStatus === 'error' && (
-            <button onClick={handleClose} className="flex-1 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700">
+            <button
+              onClick={() => {
+                closedRef.current = false;
+                connectedRef.current = false;
+                setQrString(null);
+                setErrorMessage(null);
+                setQrStatus('loading');
+                setRetryCount((c) => c + 1);
+              }}
+              className="flex-1 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
+            >
               Coba Lagi
             </button>
           )}

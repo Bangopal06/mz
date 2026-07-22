@@ -30,26 +30,44 @@ export default function BroadcastDetail({ broadcast: initial, initialLogs }: { b
     setActionLoading(true);
     try {
       const supabase = createClient();
-      const newStatus = action === 'cancel' ? 'cancelled' : 'running';
-      const { error } = await supabase
-        .from('broadcast_jobs')
-        .update({ status: newStatus, updated_at: new Date().toISOString() })
-        .eq('id', broadcast.id);
-      if (error) throw error;
+      const { data: { session } } = await supabase.auth.getSession();
+
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_SUPABASE_URL}/functions/v1/broadcasts-cancel-resume`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session?.access_token ?? ''}`,
+            apikey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '',
+          },
+          body: JSON.stringify({ broadcast_id: broadcast.id, action }),
+        }
+      );
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? 'Gagal melakukan aksi');
+      }
+
+      const { status: newStatus } = await res.json();
       setBroadcast((prev) => ({ ...prev, status: newStatus }));
 
+      // If resuming, enqueue to gateway via Next.js proxy
       if (action === 'resume') {
-        // Re-enqueue to gateway
         await fetch('/api/gateway/broadcast/enqueue', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ broadcast_id: broadcast.id, session_id: broadcast.wa_session_id }),
-        }).catch(() => {});
+          body: JSON.stringify({
+            broadcast_id: broadcast.id,
+            session_id: broadcast.wa_session_id,
+          }),
+        }).catch(() => console.warn('Gateway enqueue failed'));
       }
 
       showToast(action === 'cancel' ? 'Broadcast dibatalkan' : 'Broadcast dilanjutkan', 'success');
-    } catch {
-      showToast('Gagal melakukan aksi', 'error');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Gagal melakukan aksi', 'error');
     } finally {
       setActionLoading(false);
     }
@@ -57,16 +75,54 @@ export default function BroadcastDetail({ broadcast: initial, initialLogs }: { b
 
   useEffect(() => {
     const supabase = createClient();
-    const channel = supabase
-      .channel(`broadcast_${broadcast.id}`)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'broadcast_jobs', filter: `id=eq.${broadcast.id}` },
-        (p) => setBroadcast((prev) => ({ ...prev, ...(p.new as Broadcast) })))
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'message_logs', filter: `broadcast_id=eq.${broadcast.id}` },
-        (p) => setLogs((prev) => [...prev, p.new as Log]))
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'message_logs', filter: `broadcast_id=eq.${broadcast.id}` },
-        (p) => setLogs((prev) => prev.map((l) => l.id === (p.new as Log).id ? (p.new as Log) : l)))
+
+    // Subscribe to postgres_changes for DB-level updates
+    const dbChannel = supabase
+      .channel(`broadcast_db_${broadcast.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'broadcast_jobs', filter: `id=eq.${broadcast.id}` },
+        (p) => setBroadcast((prev) => ({ ...prev, ...(p.new as Broadcast) }))
+      )
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'message_logs', filter: `broadcast_id=eq.${broadcast.id}` },
+        (p) => setLogs((prev) => [...prev, p.new as Log])
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'message_logs', filter: `broadcast_id=eq.${broadcast.id}` },
+        (p) => setLogs((prev) => prev.map((l) => l.id === (p.new as Log).id ? (p.new as Log) : l))
+      )
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    // Also subscribe to the broadcast Realtime channel pushed by the webhook Edge Function.
+    // This gives faster progress updates than waiting for postgres_changes propagation.
+    const rtChannel = supabase
+      .channel(`broadcast:${broadcast.id}`)
+      .on('broadcast', { event: 'delivery_update' }, ({ payload }) => {
+        const { contact_id, status } = payload as { contact_id: string; status: string };
+        setLogs((prev) =>
+          prev.map((l) =>
+            l.id === contact_id ? { ...l, status } : l
+          )
+        );
+        // Refresh aggregate counters by re-fetching the job row
+        supabase
+          .from('broadcast_jobs')
+          .select('sent_count, failed_count, total_recipients, status, last_sent_index')
+          .eq('id', broadcast.id)
+          .single()
+          .then(({ data }) => {
+            if (data) setBroadcast((prev) => ({ ...prev, ...data }));
+          });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(dbChannel);
+      supabase.removeChannel(rtChannel);
+    };
   }, [broadcast.id]);
 
   const pending = broadcast.total_recipients - broadcast.sent_count - broadcast.failed_count;

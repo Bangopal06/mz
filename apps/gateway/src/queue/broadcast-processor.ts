@@ -266,7 +266,8 @@ async function sendWithRetry(
   sessionId: string,
   to: string,
   message: string,
-  media?: { url: string; mime_type: string; caption?: string }
+  media?: { url: string; mime_type: string; caption?: string },
+  serviceRoleKey?: string
 ): Promise<SendAttemptResult> {
   let lastError: { code: string; message: string } = { code: 'UNKNOWN', message: 'Unknown error' };
 
@@ -290,21 +291,28 @@ async function sendWithRetry(
       const jid = `${to}@s.whatsapp.net`;
 
       if (media) {
-        // Download media and send
-        const mediaRes = await fetch(media.url);
+        // Download media — add auth header for private Supabase Storage
+        const downloadHeaders: Record<string, string> = {};
+        if (serviceRoleKey && media.url.includes('/storage/v1/object/')) {
+          downloadHeaders['Authorization'] = `Bearer ${serviceRoleKey}`;
+          downloadHeaders['apikey'] = serviceRoleKey;
+        }
+        const mediaRes = await fetch(media.url, { headers: downloadHeaders });
         if (!mediaRes.ok) {
           throw Object.assign(new Error(`Media download failed: ${mediaRes.status}`), {
             code: 'MEDIA_DOWNLOAD_FAILED',
           });
         }
         const buffer = Buffer.from(await mediaRes.arrayBuffer());
+        // Use broadcast message as caption (personalized), fallback to attachment caption
+        const caption = message || media.caption || undefined;
         let content: Record<string, unknown>;
         if (media.mime_type.startsWith('image/')) {
-          content = { image: buffer, mimetype: media.mime_type, caption: media.caption };
+          content = { image: buffer, mimetype: media.mime_type, caption };
         } else if (media.mime_type.startsWith('video/')) {
-          content = { video: buffer, mimetype: media.mime_type, caption: media.caption };
+          content = { video: buffer, mimetype: media.mime_type, caption };
         } else {
-          content = { document: buffer, mimetype: media.mime_type, caption: media.caption };
+          content = { document: buffer, mimetype: media.mime_type, caption };
         }
         await sessionInfo.socket.sendMessage(jid, content);
       } else {
@@ -382,8 +390,29 @@ export async function processBroadcastJob(
   if (broadcastJob.attachment_id) {
     const attachment = await fetchMediaAttachment(supabase, broadcastJob.attachment_id);
     if (attachment) {
+      // Generate a signed URL (valid 1 hour) so gateway can download from private bucket
+      const signedUrlRes = await fetch(
+        `${supabase.url}/storage/v1/object/sign/media-attachments/${attachment.storage_path}`,
+        {
+          method: 'POST',
+          headers: {
+            ...supabaseHeaders(supabase.serviceRoleKey),
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ expiresIn: 3600 }),
+        }
+      );
+      let mediaUrl: string;
+      if (signedUrlRes.ok) {
+        const { signedURL } = await signedUrlRes.json() as { signedURL: string };
+        mediaUrl = `${supabase.url}/storage/v1${signedURL}`;
+      } else {
+        // Fallback: use authenticated object URL with service role key header
+        // (gateway will add auth header when downloading)
+        mediaUrl = `${supabase.url}/storage/v1/object/authenticated/media-attachments/${attachment.storage_path}`;
+      }
       media = {
-        url: `${supabase.url}/storage/v1/object/public/media-attachments/${attachment.storage_path}`,
+        url: mediaUrl,
         mime_type: attachment.mime_type,
         caption: attachment.caption ?? undefined,
       };
@@ -433,7 +462,8 @@ export async function processBroadcastJob(
       session_id,
       waNumber,
       personalizedMessage,
-      media
+      media,
+      supabase.serviceRoleKey
     );
 
     if (result.success) {
@@ -450,6 +480,30 @@ export async function processBroadcastJob(
         status: 'sent',
         sent_at: sentAt,
       });
+
+      // Save outbound message to chat_messages for chat inbox
+      const sessionInfo = sessionManager.getSession(session_id);
+      if (sessionInfo?.dbId) {
+        await fetch(`${supabase.url}/rest/v1/chat_messages`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: supabase.serviceRoleKey,
+            Authorization: `Bearer ${supabase.serviceRoleKey}`,
+            Prefer: 'return=minimal,resolution=ignore-duplicates',
+          },
+          body: JSON.stringify({
+            wa_session_id: sessionInfo.dbId,
+            contact_wa_number: waNumber,
+            direction: 'outbound',
+            message_type: media ? 'image' : 'text',
+            body: media ? (media.caption ?? null) : personalizedMessage,
+            media_url: media ? media.url : null,
+            wa_message_id: `broadcast-${broadcast_id}-${send_order}`,
+            status: 'sent',
+          }),
+        }).catch((err) => console.warn('[BroadcastProcessor] Failed to save chat_message:', err));
+      }
 
       console.info(
         `[BroadcastProcessor] ✓ Sent to ${waNumber} (send_order=${send_order}, ${i + 1}/${recipients.length})`

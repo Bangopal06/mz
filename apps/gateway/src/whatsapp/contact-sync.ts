@@ -19,23 +19,27 @@ function supabaseHeaders(key: string) {
 }
 
 function formatNumber(jid: string): string {
-  // Strip @s.whatsapp.net and ensure starts with 62 or keep as-is
+  // Strip @s.whatsapp.net and non-digit characters
   const num = jid.split('@')[0]?.replace(/[^0-9]/g, '') ?? '';
+  // Normalize: leading 0 → 62 (Indonesian)
+  if (num.startsWith('0')) return '62' + num.slice(1);
   return num;
 }
 
 function isValidNumber(num: string): boolean {
-  // Must be 10-15 digits, typically starts with country code
-  return /^\d{10,15}$/.test(num);
+  // Must be 8-20 digits, typically starts with country code
+  return /^\d{8,20}$/.test(num);
 }
 
 /**
  * Fetch contacts from WA, upsert to Supabase.
- * Uses ON CONFLICT DO NOTHING so existing contacts are not overwritten.
+ * Marks contacts as source='wa_sync' and stores source_session_id
+ * so they can be cascade-deleted when the session is removed.
  */
 export async function syncContacts(
   socket: WASocket,
-  cfg: SupabaseConfig
+  cfg: SupabaseConfig,
+  sessionDbId: string
 ): Promise<void> {
   try {
     console.info('[ContactSync] Starting contact sync...');
@@ -53,14 +57,15 @@ export async function syncContacts(
       return;
     }
 
-    const toInsert: { full_name: string; wa_number: string }[] = [];
+    const toInsert: { full_name: string; wa_number: string; source: string; source_session_id: string }[] = [];
 
     for (const c of rawContacts) {
       if (!c.id || c.id.includes('@g.us')) continue; // skip groups
+      if (c.id.includes('@lid')) continue; // skip Facebook internal IDs
       const num = formatNumber(c.id);
       if (!isValidNumber(num)) continue;
       const name = c.name ?? c.notify ?? num;
-      toInsert.push({ full_name: name, wa_number: num });
+      toInsert.push({ full_name: name, wa_number: num, source: 'wa_sync', source_session_id: sessionDbId });
     }
 
     if (!toInsert.length) {
@@ -71,6 +76,7 @@ export async function syncContacts(
     console.info(`[ContactSync] Syncing ${toInsert.length} contacts...`);
 
     // Batch upsert in chunks of 100
+    // Use merge-duplicates so source/source_session_id gets updated if contact already exists
     const chunkSize = 100;
     let synced = 0;
     for (let i = 0; i < toInsert.length; i += chunkSize) {
@@ -79,7 +85,7 @@ export async function syncContacts(
         method: 'POST',
         headers: {
           ...supabaseHeaders(cfg.serviceRoleKey),
-          Prefer: 'resolution=ignore-duplicates,return=minimal',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
         },
         body: JSON.stringify(chunk),
       });
@@ -97,41 +103,69 @@ export async function syncContacts(
 }
 
 /**
- * Listen to contacts.upsert event and sync new/updated contacts.
- * This fires when WA sends the full contact list after connection.
+ * Listen to ALL contact sync events from WA:
+ * - contacts.set     : full contact list sent by WA on first connect (most complete)
+ * - contacts.upsert  : incremental updates / additional batches
+ * - contacts.update  : name/info changes
  */
 export function watchContactsUpsert(
   socket: WASocket,
-  cfg: SupabaseConfig
+  cfg: SupabaseConfig,
+  sessionDbId: string
 ): void {
-  socket.ev.on('contacts.upsert', async (contacts) => {
-    const toInsert: { full_name: string; wa_number: string }[] = [];
+
+  async function upsertContacts(contacts: { id: string; name?: string; notify?: string; verifiedName?: string }[]) {
+    const toInsert: { full_name: string; wa_number: string; source: string; source_session_id: string }[] = [];
 
     for (const c of contacts) {
-      if (!c.id || c.id.includes('@g.us')) continue;
+      if (!c.id) continue;
+      // Skip groups and broadcasts
+      if (c.id.includes('@g.us') || c.id.includes('@broadcast')) continue;
+      // Skip @lid contacts — these are Facebook internal IDs, not phone numbers
+      if (c.id.includes('@lid')) continue;
       const num = formatNumber(c.id);
       if (!isValidNumber(num)) continue;
-      const name = (c as { name?: string; notify?: string }).name
-        ?? (c as { name?: string; notify?: string }).notify
-        ?? num;
-      toInsert.push({ full_name: name, wa_number: num });
+      const name = c.name ?? c.notify ?? c.verifiedName ?? num;
+      toInsert.push({ full_name: name, wa_number: num, source: 'wa_sync', source_session_id: sessionDbId });
     }
 
-    if (!toInsert.length) return;
+    if (!toInsert.length) return 0;
 
-    console.info(`[ContactSync] contacts.upsert: syncing ${toInsert.length} contacts`);
-
-    const chunkSize = 100;
+    const chunkSize = 200;
+    let synced = 0;
     for (let i = 0; i < toInsert.length; i += chunkSize) {
       const chunk = toInsert.slice(i, i + chunkSize);
-      await fetch(`${cfg.url}/rest/v1/contacts`, {
+      const res = await fetch(`${cfg.url}/rest/v1/contacts`, {
         method: 'POST',
         headers: {
           ...supabaseHeaders(cfg.serviceRoleKey),
-          Prefer: 'resolution=ignore-duplicates,return=minimal',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
         },
         body: JSON.stringify(chunk),
-      }).catch(() => {});
+      }).catch(() => null);
+      if (res?.ok) synced += chunk.length;
+    }
+    return synced;
+  }
+
+  // contacts.set fires with the FULL contact list on first connect
+  socket.ev.on('contacts.set', async ({ contacts }) => {
+    console.info(`[ContactSync] contacts.set: received ${contacts.length} contacts (full sync)`);
+    const synced = await upsertContacts(contacts as { id: string; name?: string; notify?: string; verifiedName?: string }[]);
+    console.info(`[ContactSync] contacts.set: synced ${synced} contacts`);
+  });
+
+  // contacts.upsert fires for incremental batches
+  socket.ev.on('contacts.upsert', async (contacts) => {
+    console.info(`[ContactSync] contacts.upsert: syncing ${contacts.length} contacts`);
+    await upsertContacts(contacts as { id: string; name?: string; notify?: string; verifiedName?: string }[]);
+  });
+
+  // contacts.update fires when a contact's name/info changes
+  socket.ev.on('contacts.update', async (updates) => {
+    const contacts = updates.filter((u) => u.notify || u.name);
+    if (contacts.length) {
+      await upsertContacts(contacts as { id: string; name?: string; notify?: string; verifiedName?: string }[]);
     }
   });
 }

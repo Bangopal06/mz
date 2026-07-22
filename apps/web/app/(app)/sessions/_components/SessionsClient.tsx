@@ -59,6 +59,7 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
   const [newSessionKey, setNewSessionKey] = useState('');
   const [creating, setCreating] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [deleteContactCount, setDeleteContactCount] = useState<number>(0);
   const [disconnecting, setDisconnecting] = useState<string | null>(null);
 
   // Supabase Realtime — subscribe to wa_sessions table changes
@@ -115,31 +116,56 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
     setQrTarget({ sessionId: session.session_key, sessionDbId: session.id, label });
   }
 
-  async function handleDisconnect(id: string) {
-    setDisconnecting(id);
+  async function handleDisconnect(dbId: string) {
+    setDisconnecting(dbId);
     try {
-      await fetch(`/api/gateway/sessions/${encodeURIComponent(id)}/disconnect`, { method: 'POST' });
+      const session = sessions.find((s) => s.id === dbId);
+      if (session) {
+        // Delete session files from disk so next reconnect is a fresh session
+        // (this ensures contacts.set is sent again with full contact list on reconnect)
+        await fetch(
+          `/api/gateway/sessions/${encodeURIComponent(session.session_key)}/delete`,
+          { method: 'DELETE' }
+        ).catch(() => {});
+      }
       const supabase = createClient();
       await supabase
         .from('wa_sessions')
         .update({ status: 'disconnected', updated_at: new Date().toISOString() })
-        .eq('id', id);
-      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, status: 'disconnected' } : s)));
+        .eq('id', dbId);
+      setSessions((prev) => prev.map((s) => (s.id === dbId ? { ...s, status: 'disconnected' } : s)));
     } finally {
       setDisconnecting(null);
     }
   }
 
   async function handleDelete(id: string) {
-    const supabase = createClient();
-    // First disconnect from gateway
-    const session = sessions.find((s) => s.id === id);
-    if (session) {
-      await fetch(`/api/gateway/sessions/${encodeURIComponent(session.session_key)}/disconnect`, { method: 'POST' }).catch(() => {});
+    // Call Next.js API route — handles gateway cleanup + DB delete with service role
+    const res = await fetch(`/api/sessions/${id}`, { method: 'DELETE' }).catch(() => null);
+
+    if (!res?.ok) {
+      const err = await res?.json().catch(() => ({}));
+      console.error('Delete session failed:', err);
     }
-    await supabase.from('wa_sessions').delete().eq('id', id);
+
     setSessions((prev) => prev.filter((s) => s.id !== id));
     setDeleteConfirm(null);
+    setDeleteContactCount(0);
+  }
+
+  async function handleDeleteRequest(id: string) {
+    // Try to count wa_sync contacts — graceful if column doesn't exist yet
+    try {
+      const supabase = createClient();
+      const { count } = await supabase
+        .from('contacts')
+        .select('*', { count: 'exact', head: true })
+        .eq('source_session_id', id);
+      setDeleteContactCount(count ?? 0);
+    } catch {
+      setDeleteContactCount(0);
+    }
+    setDeleteConfirm(id);
   }
 
   const connectedCount = sessions.filter((s) => s.status === 'connected').length;
@@ -209,7 +235,7 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
               disconnecting={disconnecting === session.id}
               onShowQR={handleShowQR}
               onDisconnect={handleDisconnect}
-              onDeleteRequest={setDeleteConfirm}
+              onDeleteRequest={handleDeleteRequest}
             />
           ))}
         </div>
@@ -307,6 +333,11 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
             <p className="text-sm text-gray-500">
               Sesi ini akan dihapus secara permanen. Broadcast yang menggunakan sesi ini tidak dapat dilanjutkan.
             </p>
+            {deleteContactCount > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                <span className="font-semibold">Perhatian:</span> {deleteContactCount} kontak yang disinkronisasi dari sesi ini akan ikut terhapus.
+              </div>
+            )}
             <div className="flex justify-end gap-3 pt-1">
               <button
                 onClick={() => setDeleteConfirm(null)}

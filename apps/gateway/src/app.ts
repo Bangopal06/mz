@@ -44,6 +44,22 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
     timeWindow: '1 minute',
   });
 
+  // Allow DELETE/GET requests to send content-type: application/json without a body.
+  // Fastify v5 rejects empty bodies when content-type is set; this parser handles
+  // that gracefully for methods that typically don't send a body.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, function (_req, body, done) {
+    if (!body || (body as string).trim() === '') {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      (err as Error).message = `Invalid JSON: ${(err as Error).message}`;
+      done(err as Error, undefined);
+    }
+  });
+
   // API key authentication for all routes
   app.addHook('onRequest', apiKeyMiddleware(config.gatewayApiKey));
 

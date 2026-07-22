@@ -11,6 +11,7 @@ import { createClient } from 'jsr:@supabase/supabase-js@2'
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
 }
 
 function json(body: unknown, status = 200) {
@@ -22,6 +23,11 @@ function json(body: unknown, status = 200) {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS })
+
+  // Accept both PATCH and POST for compatibility
+  if (req.method !== 'PATCH' && req.method !== 'POST') {
+    return json({ error: 'Method not allowed' }, 405)
+  }
 
   const supabase = createClient(
     Deno.env.get('SUPABASE_URL')!,
@@ -79,19 +85,8 @@ Deno.serve(async (req) => {
       .update({ status: 'running', updated_at: new Date().toISOString() })
       .eq('id', broadcast_id)
 
-    // Re-enqueue in gateway
-    try {
-      await fetch(`${gatewayUrl}/jobs/enqueue`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': gatewayApiKey },
-        body: JSON.stringify({
-          broadcast_id,
-          session_id: job.wa_session_id,
-          rate_limit_min_ms: job.rate_limit_min_ms,
-          rate_limit_max_ms: job.rate_limit_max_ms,
-        }),
-      })
-    } catch { /* fire and forget */ }
+    // Note: Gateway enqueue is handled by the client via Next.js proxy
+    // because Supabase Edge Functions cannot reach localhost gateway.
 
     return json({ broadcast_id, status: 'running' })
   }

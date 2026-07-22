@@ -264,7 +264,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - Tampilkan pratinjau sebelum broadcast dikirim
     - _Requirements: 11.4, 11.5, 11.8_
 
-- [ ] 11. WhatsApp Gateway Service
+- [x] 11. WhatsApp Gateway Service
   - [x] 11.1 Setup project Node.js gateway (`apps/gateway`)
     - Express/Fastify server dengan TypeScript
     - Integrasi Baileys untuk koneksi WhatsApp
@@ -305,8 +305,8 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - Download media dari Supabase Storage URL sebelum dikirim
     - _Requirements: 6.6, 11.7_
 
-- [ ] 12. Sistem Antrian Broadcast (BullMQ)
-  - [ ] 12.1 Implementasi BullMQ queue di gateway
+- [x] 12. Sistem Antrian Broadcast (BullMQ)
+  - [x] 12.1 Implementasi BullMQ queue di gateway
     - Queue `broadcast-queue` dengan concurrency 1 per sesi
     - Job processor: ambil penerima dari DB, kirim satu per satu
     - Rate limiter: jeda acak `[rate_limit_min_ms, rate_limit_max_ms]` antar pesan
@@ -316,7 +316,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 18: Rate Limiter dalam Batas yang Ditentukan**
     - **Validates: Requirements 6.5**
 
-  - [-] 12.3 Implementasi logika resume broadcast saat gateway terputus
+  - [x] 12.3 Implementasi logika resume broadcast saat gateway terputus
     - Update `last_sent_index` di DB setelah setiap pesan berhasil dikirim
     - Saat gateway reconnect, query broadcast dengan status `paused`
     - Resume dari `last_sent_index + 1`, enqueue ulang ke BullMQ
@@ -326,19 +326,19 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 20: Resume Broadcast Tidak Mengirim Ulang Pesan Terkirim**
     - **Validates: Requirements 6.8**
 
-  - [-] 12.5 Implementasi retry logic per pesan gagal
+  - [x] 12.5 Implementasi retry logic per pesan gagal
     - Attempt 1: langsung; Attempt 2: delay 5s; Attempt 3: delay 15s
     - Setelah 3 kali gagal: update status message_log = `failed`, lanjut ke penerima berikutnya
     - Catat error code dan error message ke `message_logs`
     - _Requirements: 6.6, 10.4_
 
-  - [-] 12.6 Implementasi endpoint enqueue dan cancel job di gateway
+  - [x] 12.6 Implementasi endpoint enqueue dan cancel job di gateway
     - `POST /jobs/enqueue` — tambah broadcast job ke queue
     - `DELETE /jobs/:id/cancel` — batalkan job dari queue atau hentikan yang sedang berjalan
     - _Requirements: 6.10_
 
-- [ ] 13. Edge Functions Broadcast dan Webhook
-  - [ ] 13.1 Implementasi Edge Function buat broadcast (`supabase/functions/broadcasts/`)
+- [x] 13. Edge Functions Broadcast dan Webhook
+  - [x] 13.1 Implementasi Edge Function buat broadcast (`supabase/functions/broadcasts/`)
     - Validasi input: title, message_body atau template_id, recipient_type, wa_session_id
     - Resolusi penerima: query semua aktif / anggota grup / manual selection
     - Insert ke `broadcast_jobs` dan `broadcast_recipients` dengan `send_order`
@@ -354,7 +354,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 17: Scheduled Broadcast Tidak Dikirim Sebelum Waktunya**
     - **Validates: Requirements 6.4**
 
-  - [ ] 13.4 Implementasi Edge Function webhook delivery callback (`supabase/functions/webhooks/`)
+  - [x] 13.4 Implementasi Edge Function webhook delivery callback (`supabase/functions/webhooks/`)
     - `PATCH /webhooks/delivery` — terima status pengiriman dari gateway
     - Verifikasi HMAC signature dari gateway
     - Update `message_logs.status`, catat `sent_at`, `error_code`, `error_message`
@@ -370,13 +370,13 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 21: Statistik Broadcast Akurat**
     - **Validates: Requirements 7.3**
 
-  - [ ] 13.7 Implementasi Edge Function cancel dan resume broadcast
+  - [x] 13.7 Implementasi Edge Function cancel dan resume broadcast
     - `PATCH /broadcasts/:id/cancel` — update status ke `cancelled`, batalkan job di queue
     - `PATCH /broadcasts/:id/resume` — update status ke `running`, enqueue ulang dari `last_sent_index + 1`
     - _Requirements: 6.8, 6.10_
 
-- [ ] 14. Halaman Broadcast — Buat dan Kelola
-  - [ ] 14.1 Implementasi form buat broadcast baru (`app/broadcasts/new/`)
+- [x] 14. Halaman Broadcast — Buat dan Kelola
+  - [x] 14.1 Implementasi form buat broadcast baru (`app/broadcasts/new/`)
     - Step 1: Pilih mode penerima (radio: semua / grup / manual)
     - Step 2 (grup): Daftar grup dengan checkbox dan jumlah anggota
     - Step 2 (manual): Daftar kontak dengan checkbox dan search
@@ -385,7 +385,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - Submit → panggil Edge Function `/broadcasts`
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.7, 11.8_
 
-  - [ ] 14.2 Implementasi progress broadcast real-time
+  - [x] 14.2 Implementasi progress broadcast real-time
     - Subscribe ke Supabase Realtime channel `broadcast:{id}`
     - Tampilkan progress bar: terkirim / gagal / tersisa dari total
     - Update counter secara real-time tanpa reload
@@ -396,8 +396,8 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 32: Broadcast dengan Media Mengirim Media ke Semua Penerima**
     - **Validates: Requirements 11.7**
 
-- [ ] 15. Riwayat dan Laporan Broadcast
-  - [ ] 15.1 Implementasi halaman daftar riwayat broadcast (`app/broadcasts/`)
+- [x] 15. Riwayat dan Laporan Broadcast
+  - [x] 15.1 Implementasi halaman daftar riwayat broadcast (`app/broadcasts/`)
     - Tabel broadcast jobs: judul, status, total/terkirim/gagal, tanggal dibuat
     - Filter berdasarkan rentang tanggal
     - Paginasi 50 item per halaman
@@ -407,7 +407,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 22: Filter Tanggal Riwayat Broadcast**
     - **Validates: Requirements 7.4**
 
-  - [ ] 15.3 Implementasi halaman detail broadcast (`app/broadcasts/[id]/`)
+  - [x] 15.3 Implementasi halaman detail broadcast (`app/broadcasts/[id]/`)
     - Ringkasan statistik: persentase keberhasilan, jumlah terkirim, gagal, pending
     - Tabel daftar penerima dengan status masing-masing (terkirim/gagal/pending)
     - Tombol ekspor ke CSV
@@ -417,13 +417,13 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 23: Ekspor CSV Round-Trip**
     - **Validates: Requirements 7.5**
 
-- [ ] 16. Checkpoint — Broadcast End-to-End
+- [x] 16. Checkpoint — Broadcast End-to-End
   - Pastikan alur lengkap buat → kirim → progress real-time → laporan berfungsi
   - Pastikan resume, cancel, dan scheduled broadcast berfungsi benar
   - Pastikan semua tests pass, tanya user jika ada pertanyaan.
 
-- [ ] 17. Auto Reply Berbasis Keyword
-  - [ ] 17.1 Implementasi fungsi keyword matching
+- [x] 17. Auto Reply Berbasis Keyword
+  - [x] 17.1 Implementasi fungsi keyword matching
     - Fungsi `matchKeyword(message: string, rules: KeywordRule[]): KeywordRule | null`
     - Normalize pesan dan keyword ke lowercase sebelum membandingkan
     - Cek apakah pesan mengandung salah satu keyword dari setiap rule aktif
@@ -442,7 +442,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 35: Rule Dinonaktifkan Tidak Memicu Auto Reply**
     - **Validates: Requirements 12.5**
 
-  - [ ] 17.5 Implementasi Edge Function webhook pesan masuk (`supabase/functions/webhooks/incoming`)
+  - [x] 17.5 Implementasi Edge Function webhook pesan masuk (`supabase/functions/webhooks/incoming`)
     - Terima event pesan masuk dari gateway
     - Query `keyword_rules` yang aktif beserta `keyword_triggers`
     - Jalankan `matchKeyword()` terhadap isi pesan
@@ -455,15 +455,15 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 36: Greeting Dikirim Maksimal Satu Kali per Kontak per Sesi**
     - **Validates: Requirements 12.8**
 
-  - [ ] 17.7 Implementasi halaman manajemen auto reply (`app/auto-reply/`)
+  - [x] 17.7 Implementasi halaman manajemen auto reply (`app/auto-reply/`)
     - Daftar Keyword_Rule dengan nama, keyword trigger, status aktif/nonaktif
     - Form buat/edit rule: nama, keyword-keyword pemicu (multi-input), teks respons
     - Toggle aktif/nonaktif tanpa menghapus konfigurasi
     - Checkbox flag `is_greeting` untuk pesan sambutan
     - _Requirements: 12.1, 12.3, 12.4, 12.5, 12.8_
 
-- [ ] 18. Dashboard Admin
-  - [ ] 18.1 Implementasi Edge Function statistik dashboard (`supabase/functions/dashboard-stats/`)
+- [x] 18. Dashboard Admin
+  - [x] 18.1 Implementasi Edge Function statistik dashboard (`supabase/functions/dashboard-stats/`)
     - Hitung: total kontak, pesan terkirim hari ini, pesan gagal hari ini, broadcast aktif
     - Hitung tren 7 hari: aggregasi `message_logs` per hari selama 7 hari terakhir
     - Query status semua `wa_sessions` aktif
@@ -478,7 +478,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 3: Grafik Tren 7 Hari Selalu 7 Titik Data**
     - **Validates: Requirements 1.8**
 
-  - [ ] 18.4 Implementasi halaman dashboard (`app/dashboard/`)
+  - [x] 18.4 Implementasi halaman dashboard (`app/dashboard/`)
     - Grid kartu statistik: total kontak, terkirim hari ini, gagal hari ini, broadcast aktif
     - Status indikator sesi WA (badge connected/disconnected per sesi)
     - Grafik garis tren 7 hari menggunakan library chart (Recharts atau Chart.js)
@@ -490,8 +490,8 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 2: Realtime Update Saat Status Berubah**
     - **Validates: Requirements 1.7**
 
-- [ ] 19. Log Aktivitas
-  - [ ] 19.1 Implementasi helper fungsi `logActivity()`
+- [x] 19. Log Aktivitas
+  - [x] 19.1 Implementasi helper fungsi `logActivity()`
     - Fungsi `logActivity({ user_id, action, entity_type, entity_id, detail, ip_address })`
     - Dipanggil dari semua Edge Functions untuk aksi penting
     - Aksi yang dicatat: login, broadcast.create, contact.delete, user.role_change, error.send, auto_reply.sent
@@ -501,44 +501,44 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - **Property 29: Setiap Aksi Penting Menghasilkan Entry di activity_logs**
     - **Validates: Requirements 10.1, 10.4, 12.7**
 
-  - [ ] 19.3 Implementasi halaman log aktivitas (`app/logs/`)
+  - [x] 19.3 Implementasi halaman log aktivitas (`app/logs/`)
     - Tabel log: waktu, jenis aksi, user yang melakukan, detail
     - Filter berdasarkan jenis aksi dan rentang waktu
     - Paginasi 50 item per halaman
     - _Requirements: 10.2_
 
-- [ ] 20. Checkpoint — Semua Fitur Terintegrasi
+- [x] 20. Checkpoint — Semua Fitur Terintegrasi
   - Pastikan auto reply, dashboard, dan log aktivitas berfungsi end-to-end
   - Pastikan Realtime update berfungsi di dashboard dan progress broadcast
   - Pastikan semua tests pass, tanya user jika ada pertanyaan.
 
-- [ ] 21. Integrasi dan Penyambungan Komponen
-  - [ ] 21.1 Wiring komponen permission guard di frontend
+- [x] 21. Integrasi dan Penyambungan Komponen
+  - [x] 21.1 Wiring komponen permission guard di frontend
     - Buat HOC/hook `usePermission(action, resource)` yang query role dari context auth
     - Sembunyikan atau disable UI element berdasarkan role (bukan hanya redirect)
     - Terapkan di semua halaman: kontak (Staff/Operator read-only), users (Owner only), dll.
     - _Requirements: 9.6, 9.7_
 
-  - [ ] 21.2 Implementasi notifikasi UI untuk event sistem
+  - [x] 21.2 Implementasi notifikasi UI untuk event sistem
     - Toast notification saat sesi WA terputus (dari Realtime event)
     - Toast notification saat broadcast selesai atau gagal
     - Badge notifikasi di nav jika ada sesi expired
     - _Requirements: 8.3, 1.7_
 
-  - [ ] 21.3 Implementasi layout dan navigasi aplikasi
+  - [x] 21.3 Implementasi layout dan navigasi aplikasi
     - Sidebar navigasi dengan semua route utama
     - Tampilkan nama user dan role di sidebar
     - Conditional menu items berdasarkan role (sembunyikan menu yang tidak diizinkan)
     - Responsive layout untuk layar kecil
     - _Requirements: 9.6_
 
-  - [ ] 21.4 Integrasi penuh alur media dalam broadcast
+  - [x] 21.4 Integrasi penuh alur media dalam broadcast
     - Pastikan media yang diupload di template tersedia saat broadcast dibuat
     - Gateway download media dari Supabase Storage URL saat mengirim
     - Verifikasi media caption ikut terkirim ke semua penerima
     - _Requirements: 11.5, 11.6, 11.7_
 
-- [ ] 22. Pengujian E2E dengan Playwright
+- [x] 22. Pengujian E2E dengan Playwright
   - [ ]* 22.1 Tulis E2E test: alur login dan proteksi route
     - Test login berhasil → redirect ke dashboard
     - Test akses route terproteksi tanpa login → redirect ke login
@@ -562,7 +562,7 @@ Stack: Next.js 14 (App Router) · Supabase (PostgreSQL + Auth + Edge Functions +
     - Test status berubah ke connected setelah mock scan
     - _Requirements: 8.1, 8.2_
 
-- [ ] 23. Checkpoint Final — Pastikan semua tests pass, tanya user jika ada pertanyaan.
+- [x] 23. Checkpoint Final — Pastikan semua tests pass, tanya user jika ada pertanyaan.
 
 ---
 

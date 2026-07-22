@@ -41,3 +41,18 @@ export function sanitizeWaNumber(phone: string): string {
   // Assume Indonesian number without country code
   return '62' + digits;
 }
+
+/**
+ * Normalizes a WhatsApp number to the standard international format `62xxxxxxxxxx`.
+ * Alias for sanitizeWaNumber — handles formats: `+62xxx`, `08xxx`, `62xxx`, `8xxx`.
+ *
+ * Requirement 1.5: contact_wa_number must always be stored in international format.
+ *
+ * @example
+ * normalizeWaNumber('+628123456789')  // '628123456789'
+ * normalizeWaNumber('08123456789')    // '628123456789'
+ * normalizeWaNumber('628123456789')   // '628123456789'
+ */
+export function normalizeWaNumber(phone: string): string {
+  return sanitizeWaNumber(phone);
+}

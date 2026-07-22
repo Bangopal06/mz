@@ -13,6 +13,7 @@ export interface AppConfig {
   supabase: {
     url: string;
     serviceRoleKey: string;
+    anonKey: string;
   };
   gatewayApiKey: string;
   webhookHmacSecret: string;
@@ -51,6 +52,7 @@ export function loadConfig(): AppConfig {
     supabase: {
       url: process.env['SUPABASE_URL']!,
       serviceRoleKey: process.env['SUPABASE_SERVICE_ROLE_KEY']!,
+      anonKey: process.env['SUPABASE_ANON_KEY'] ?? '',
     },
     gatewayApiKey: process.env['GATEWAY_API_KEY']!,
     webhookHmacSecret: process.env['WEBHOOK_HMAC_SECRET']!,

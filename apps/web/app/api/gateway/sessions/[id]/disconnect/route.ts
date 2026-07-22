@@ -34,6 +34,7 @@ export async function POST(
         headers: {
           'x-api-key': GATEWAY_API_KEY,
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       }
     );
