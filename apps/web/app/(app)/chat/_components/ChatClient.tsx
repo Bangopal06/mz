@@ -241,6 +241,7 @@ export default function ChatClient({
             conversations={filteredConversations}
             activeContact={selectedContact?.contact_wa_number ?? null}
             selectedSessionId={selectedSessionId}
+            sessions={sessions}
             onSelectContact={handleSelectContact}
           />
         </div>

@@ -87,21 +87,69 @@ export async function sessionRoutes(
   }) => notifyWebhook(gatewayWebhookUrl, webhookHmacSecret, supabaseAnonKey, payload);
 
   // ── Shared onMessage handler (always active, survives SSE overrides) ─────────
-  const sharedOnMessage = (sessionId: string, event: unknown) => {
-    const { messages, type } = event as { messages: { key: { fromMe?: boolean; remoteJid?: string; id?: string }; message?: { conversation?: string; extendedTextMessage?: { text?: string }; imageMessage?: { mimetype?: string } } }[]; type: string };
+  const sharedOnMessage = async (sessionId: string, event: unknown) => {
+    const { messages, type } = event as { messages: { key: { fromMe?: boolean; remoteJid?: string; id?: string }; message?: unknown; messageTimestamp?: number | { low?: number } }[]; type: string };
+    // Accept both 'notify' (new messages) and 'append' (can be new in some Baileys configs)
     if (type !== 'notify' && type !== 'append') return;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const fiveMinutesAgo = nowSec - 300; // only process messages from last 5 minutes
+
     for (const msg of messages ?? []) {
+      const rawJidAll = msg.key.remoteJid ?? '';
+      console.log(`[MSG-IN] type=${type} fromMe=${msg.key.fromMe} jid="${rawJidAll}"`);
       if (msg.key.fromMe) continue;
       const rawJid = msg.key.remoteJid ?? '';
       if (!rawJid) continue;
-      // Skip groups, broadcasts (termasuk status@broadcast), dan @lid
-      if (rawJid.endsWith('@g.us') || rawJid.endsWith('@broadcast') || rawJid.endsWith('@lid')) continue;
-      // Normalize JID: strip device suffix "number:deviceId@domain" → "number@domain"
-      const from = rawJid.includes(':') && rawJid.endsWith('@s.whatsapp.net')
-        ? rawJid.replace(/:\d+@/, '@')
-        : rawJid;
 
-      const text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? '';
+      // For 'append' type, only process if message is recent (not old history)
+      if (type === 'append') {
+        const ts = typeof msg.messageTimestamp === 'object'
+          ? (msg.messageTimestamp?.low ?? 0)
+          : (msg.messageTimestamp ?? 0);
+        if (ts < fiveMinutesAgo) continue; // skip old history messages
+      }
+
+      // Skip groups and broadcasts only — handle @lid by resolving to phone number
+      if (rawJid.endsWith('@g.us') || rawJid.endsWith('@broadcast')) continue;
+
+      let from: string;
+      if (rawJid.endsWith('@lid')) {
+        // Resolve @lid to phone number using lidMap built from contacts events
+        const sessionInfo2 = app.sessionManager.getSession(sessionId);
+        const phone = sessionInfo2?.lidMap.get(rawJid);
+        if (phone) {
+          from = `${phone}@s.whatsapp.net`;
+        } else {
+          // Try to resolve via WA API
+          try {
+            const lid = rawJid.replace('@lid', '');
+            const results = await sessionInfo2?.socket.onWhatsApp(lid) ?? [];
+            const resolved = results.find(r => r.exists && r.jid?.endsWith('@s.whatsapp.net'));
+            if (resolved?.jid) {
+              from = resolved.jid.replace(/:\d+@/, '@');
+              // Cache for future
+              if (sessionInfo2) sessionInfo2.lidMap.set(rawJid, from.split('@')[0] ?? '');
+              console.log(`[LID] Resolved via onWhatsApp: ${rawJid} → ${from}`);
+            } else {
+              console.log(`[LID] Cannot resolve ${rawJid} via onWhatsApp`);
+              continue;
+            }
+          } catch (err) {
+            console.log(`[LID] onWhatsApp error for ${rawJid}:`, err);
+            continue;
+          }
+        }
+      } else {
+        // Normalize JID: strip device suffix "number:deviceId@domain" → "number@domain"
+        from = rawJid.includes(':') && rawJid.endsWith('@s.whatsapp.net')
+          ? rawJid.replace(/:\d+@/, '@')
+          : rawJid;
+      }
+
+      const text = (msg as { message?: { conversation?: string; extendedTextMessage?: { text?: string } } }).message?.conversation
+        ?? (msg as { message?: { conversation?: string; extendedTextMessage?: { text?: string } } }).message?.extendedTextMessage?.text
+        ?? '';
       const sessionInfo = app.sessionManager.getSession(sessionId);
       if (!sessionInfo) continue;
 

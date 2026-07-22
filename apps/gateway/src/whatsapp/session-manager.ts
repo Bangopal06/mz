@@ -20,12 +20,13 @@ export interface SessionInfo {
   displayName?: string;
   lastActiveAt?: Date;
   reconnectAttempts: number;
+  lidMap: Map<string, string>; // @lid JID → phone number (e.g. "107215352516631@lid" → "6285113253248")
 }
 
 export type SessionEventHandler = {
   onStatusChange?: (sessionId: string, status: SessionStatus) => void;
   onQrCode?: (sessionId: string, qr: string) => void;
-  onMessage?: (sessionId: string, message: unknown) => void;
+  onMessage?: (sessionId: string, message: unknown) => Promise<void> | void;
   onConnected?: (sessionId: string, socket: WASocket) => void;
 };
 
@@ -231,7 +232,8 @@ export class SessionManager {
         child: () => ({ level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => ({} as any) }),
       } as any,
       markOnlineOnConnect: false,
-      syncFullHistory: true,  // needed to receive contacts.set with full contact list
+      syncFullHistory: false,
+      getMessage: async () => undefined,
     });
 
     const sessionInfo: SessionInfo = {
@@ -240,12 +242,35 @@ export class SessionManager {
       socket,
       status: 'pairing',
       reconnectAttempts,
+      lidMap: new Map(),
     };
 
     this.sessions.set(sessionId, sessionInfo);
 
     // Persist credentials on update
     socket.ev.on('creds.update', saveCreds);
+
+    // Build lid→phone mapping from contacts events (for Multi-Device @lid JID resolution)
+    function updateLidMap(contacts: Array<{ id?: string; lid?: string }>) {
+      for (const c of contacts) {
+        if (!c.id || !c.lid) continue;
+        if (!c.id.endsWith('@s.whatsapp.net')) continue;
+        const phone = c.id.split('@')[0]?.split(':')[0] ?? '';
+        if (phone) {
+          sessionInfo.lidMap.set(c.lid, phone);
+        }
+      }
+    }
+
+    socket.ev.on('contacts.set', ({ contacts }) => {
+      updateLidMap(contacts as Array<{ id?: string; lid?: string }>);
+    });
+    socket.ev.on('contacts.upsert', (contacts) => {
+      updateLidMap(contacts as Array<{ id?: string; lid?: string }>);
+    });
+    socket.ev.on('contacts.update', (updates) => {
+      updateLidMap(updates as Array<{ id?: string; lid?: string }>);
+    });
 
     // Handle connection state changes
     socket.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
