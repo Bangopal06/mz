@@ -9,9 +9,18 @@
 CREATE OR REPLACE FUNCTION delete_wa_sync_contacts_on_session_delete()
 RETURNS TRIGGER AS $$
 BEGIN
+  -- Only delete wa_sync contacts not referenced in any broadcast
   DELETE FROM contacts
   WHERE source = 'wa_sync'
+    AND source_session_id = OLD.id
+    AND id NOT IN (SELECT contact_id FROM broadcast_recipients);
+  
+  -- For contacts still in broadcasts, just clear the session reference
+  UPDATE contacts
+  SET source_session_id = NULL
+  WHERE source = 'wa_sync'
     AND source_session_id = OLD.id;
+    
   RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
