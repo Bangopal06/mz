@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import type { FastifyInstance, FastifyPluginOptions } from 'fastify';
 import type { AppConfig } from '../config/index.js';
-import { handleIncomingMessage } from '../whatsapp/auto-reply.js';
+import { handleIncomingMessage, saveChatMessage } from '../whatsapp/auto-reply.js';
+import { GLOBAL_LID_MAP, saveLidMapToDisk } from '../whatsapp/session-manager.js';
 
 /** Options passed when registering this plugin. */
 export interface SessionRoutesOptions extends FastifyPluginOptions {
@@ -89,62 +90,61 @@ export async function sessionRoutes(
   // ── Shared onMessage handler (always active, survives SSE overrides) ─────────
   const sharedOnMessage = async (sessionId: string, event: unknown) => {
     const { messages, type } = event as { messages: { key: { fromMe?: boolean; remoteJid?: string; id?: string }; message?: unknown; messageTimestamp?: number | { low?: number } }[]; type: string };
-    // Accept both 'notify' (new messages) and 'append' (can be new in some Baileys configs)
     if (type !== 'notify' && type !== 'append') return;
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const fiveMinutesAgo = nowSec - 300; // only process messages from last 5 minutes
+    const fiveMinutesAgo = nowSec - 300;
 
     for (const msg of messages ?? []) {
       const rawJidAll = msg.key.remoteJid ?? '';
-      console.log(`[MSG-IN] type=${type} fromMe=${msg.key.fromMe} jid="${rawJidAll}"`);
-      if (msg.key.fromMe) continue;
-      const rawJid = msg.key.remoteJid ?? '';
-      if (!rawJid) continue;
+      if (!rawJidAll) continue;
 
-      // For 'append' type, only process if message is recent (not old history)
+      // For 'append' type, only process recent messages (not history)
       if (type === 'append') {
         const ts = typeof msg.messageTimestamp === 'object'
           ? (msg.messageTimestamp?.low ?? 0)
           : (msg.messageTimestamp ?? 0);
-        if (ts < fiveMinutesAgo) continue; // skip old history messages
+        if (ts < fiveMinutesAgo) continue;
       }
 
-      // Skip groups and broadcasts only — handle @lid by resolving to phone number
-      if (rawJid.endsWith('@g.us') || rawJid.endsWith('@broadcast')) continue;
+      // Skip groups and broadcasts
+      if (rawJidAll.endsWith('@g.us') || rawJidAll.endsWith('@broadcast')) continue;
 
-      let from: string;
-      if (rawJid.endsWith('@lid')) {
-        // Resolve @lid to phone number using lidMap built from contacts events
+      // Resolve JID to phone number
+      let resolvedJid: string;
+      if (rawJidAll.endsWith('@lid')) {
         const sessionInfo2 = app.sessionManager.getSession(sessionId);
-        const phone = sessionInfo2?.lidMap.get(rawJid);
+        // Check session lidMap first, then fall back to GLOBAL_LID_MAP (persisted across restarts)
+        const phone = sessionInfo2?.lidMap.get(rawJidAll) ?? GLOBAL_LID_MAP.get(rawJidAll);
         if (phone) {
-          from = `${phone}@s.whatsapp.net`;
+          resolvedJid = `${phone}@s.whatsapp.net`;
         } else {
-          // Try to resolve via WA API
           try {
-            const lid = rawJid.replace('@lid', '');
+            const lid = rawJidAll.replace('@lid', '');
+            console.log(`[LID] Trying onWhatsApp for lid=${lid}`);
             const results = await sessionInfo2?.socket.onWhatsApp(lid) ?? [];
+            console.log(`[LID] onWhatsApp results for ${lid}:`, JSON.stringify(results));
             const resolved = results.find(r => r.exists && r.jid?.endsWith('@s.whatsapp.net'));
             if (resolved?.jid) {
-              from = resolved.jid.replace(/:\d+@/, '@');
-              // Cache for future
-              if (sessionInfo2) sessionInfo2.lidMap.set(rawJid, from.split('@')[0] ?? '');
-              console.log(`[LID] Resolved via onWhatsApp: ${rawJid} → ${from}`);
+              resolvedJid = resolved.jid.replace(/:\d+@/, '@');
+              const phoneResolved = resolvedJid.split('@')[0] ?? '';
+              if (sessionInfo2) sessionInfo2.lidMap.set(rawJidAll, phoneResolved);
+              GLOBAL_LID_MAP.set(rawJidAll, phoneResolved);
+              void saveLidMapToDisk(config.sessionStorePath);
+              console.log(`[LID] Resolved via onWhatsApp: ${rawJidAll} → ${resolvedJid}`);
             } else {
-              console.log(`[LID] Cannot resolve ${rawJid} via onWhatsApp`);
+              console.log(`[LID] onWhatsApp found no match for ${lid}`);
               continue;
             }
           } catch (err) {
-            console.log(`[LID] onWhatsApp error for ${rawJid}:`, err);
+            console.log(`[LID] onWhatsApp error for ${rawJidAll}:`, (err as Error).message);
             continue;
           }
         }
       } else {
-        // Normalize JID: strip device suffix "number:deviceId@domain" → "number@domain"
-        from = rawJid.includes(':') && rawJid.endsWith('@s.whatsapp.net')
-          ? rawJid.replace(/:\d+@/, '@')
-          : rawJid;
+        resolvedJid = rawJidAll.includes(':') && rawJidAll.endsWith('@s.whatsapp.net')
+          ? rawJidAll.replace(/:\d+@/, '@')
+          : rawJidAll;
       }
 
       const text = (msg as { message?: { conversation?: string; extendedTextMessage?: { text?: string } } }).message?.conversation
@@ -152,18 +152,33 @@ export async function sessionRoutes(
         ?? '';
       const sessionInfo = app.sessionManager.getSession(sessionId);
       if (!sessionInfo) continue;
+      const rawMsg = msg as { key?: { id?: string }; message?: { imageMessage?: { mimetype?: string } } };
+      const messageId = rawMsg?.key?.id ?? `${Date.now()}-${resolvedJid}`;
 
-      // Pass sessionDbId (UUID from wa_sessions) and rawMessage for chat_messages save
-      void handleIncomingMessage(
-        { url: config.supabase.url, serviceRoleKey: config.supabase.serviceRoleKey },
-        config.gatewayWebhookUrl, config.gatewayApiKey, sessionId, from, text,
-        async (to: string, message: string) => {
-          const jid = `${to}@s.whatsapp.net`;
-          await sessionInfo.socket.sendMessage(jid, { text: message });
-        },
-        sessionInfo.dbId,
-        msg
-      );
+      if (msg.key.fromMe) {
+        // Outbound message sent from phone — save to DB as outbound
+        if (!sessionInfo.dbId) continue;
+        const waNumber = resolvedJid.replace('@s.whatsapp.net', '');
+        const imageMsg = rawMsg?.message?.imageMessage;
+        void saveChatMessage(
+          { url: config.supabase.url, serviceRoleKey: config.supabase.serviceRoleKey },
+          sessionInfo.dbId, waNumber, messageId, text || null,
+          imageMsg ? 'image' : 'text', null,
+          'outbound'
+        );
+      } else {
+        // Inbound message — save + auto-reply
+        void handleIncomingMessage(
+          { url: config.supabase.url, serviceRoleKey: config.supabase.serviceRoleKey },
+          config.gatewayWebhookUrl, config.gatewayApiKey, sessionId, resolvedJid, text,
+          async (to: string, message: string) => {
+            const jid = `${to}@s.whatsapp.net`;
+            await sessionInfo.socket.sendMessage(jid, { text: message });
+          },
+          sessionInfo.dbId,
+          msg
+        );
+      }
     }
   };
 

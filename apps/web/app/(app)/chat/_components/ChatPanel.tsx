@@ -71,6 +71,69 @@ export default function ChatPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contact]);
 
+  // Poll for new messages every 5 seconds as realtime fallback
+  useEffect(() => {
+    if (!contact) return;
+
+    // Also subscribe directly to realtime for this conversation
+    const channel = supabase
+      .channel(`chat_${contact.wa_session_id}_${contact.contact_wa_number}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'chat_messages',
+        filter: `contact_wa_number=eq.${contact.contact_wa_number}`,
+      }, (payload) => {
+        const newMsg = payload.new as ChatMessage;
+        if (newMsg.wa_session_id !== contact.wa_session_id) return;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          // Replace optimistic if outbound
+          if (newMsg.direction === 'outbound') {
+            const idx = prev.findIndex(m => m.id.startsWith('optimistic-') && m.body === newMsg.body);
+            if (idx !== -1) {
+              const updated = [...prev];
+              updated[idx] = newMsg;
+              return updated;
+            }
+          }
+          const merged = [...prev, newMsg].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+          setTimeout(scrollToBottom, 50);
+          return merged;
+        });
+      })
+      .subscribe();
+
+    const poll = setInterval(async () => {
+      const { data } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .eq('wa_session_id', contact.wa_session_id)
+        .eq('contact_wa_number', contact.contact_wa_number)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (!data?.length) return;
+      const latest = ([...(data as ChatMessage[])].reverse());
+
+      setMessages((prev) => {
+        const existingIds = new Set(prev.map(m => m.id));
+        const newMsgs = latest.filter(m => !existingIds.has(m.id) && !m.id.startsWith('optimistic-'));
+        if (!newMsgs.length) return prev;
+        const merged = [...prev.filter(m => !newMsgs.some(n => n.id === m.id)), ...newMsgs];
+        merged.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+        setTimeout(scrollToBottom, 50);
+        return merged;
+      });
+    }, 5000);
+
+    return () => {
+      clearInterval(poll);
+      supabase.removeChannel(channel);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contact]);
+
   // Handle new incoming realtime message (from ChatClient)
   useEffect(() => {
     if (!newIncomingMessage) return;

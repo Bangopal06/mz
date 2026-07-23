@@ -8,6 +8,42 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import type { SessionStatus, WaSession } from '../types/index.js';
+
+/** Persistent storage for @lid → phone number mapping, survives gateway restarts */
+export const GLOBAL_LID_MAP = new Map<string, string>();
+
+async function loadLidMapFromDisk(sessionStorePath: string): Promise<void> {
+  try {
+    const mapPath = path.join(sessionStorePath, '_lid_map.json');
+    const raw = await fs.readFile(mapPath, 'utf-8');
+    const entries = JSON.parse(raw) as [string, string][];
+    for (const [lid, phone] of entries) {
+      GLOBAL_LID_MAP.set(lid, phone);
+    }
+    console.info(`[LidMap] Loaded ${GLOBAL_LID_MAP.size} entries from disk`);
+  } catch {
+    // File doesn't exist yet — fine
+  }
+}
+
+export async function saveLidMapToDisk(sessionStorePath: string): Promise<void> {
+  try {
+    const mapPath = path.join(sessionStorePath, '_lid_map.json');
+    await fs.writeFile(mapPath, JSON.stringify([...GLOBAL_LID_MAP.entries()]));
+  } catch (err) {
+    console.warn('[LidMap] Failed to save to disk:', err);
+  }
+}
+
+/** Manually seed known @lid → phone mappings that can't be auto-resolved */
+export function seedLidMap(entries: Record<string, string>): void {
+  for (const [lid, phone] of Object.entries(entries)) {
+    const lidJid = lid.endsWith('@lid') ? lid : `${lid}@lid`;
+    GLOBAL_LID_MAP.set(lidJid, phone);
+    GLOBAL_LID_MAP.set(lid, phone);
+  }
+  console.info(`[LidMap] Seeded ${Object.keys(entries).length} manual entries, total=${GLOBAL_LID_MAP.size}`);
+}
 import { watchContactsUpsert } from './contact-sync.js';
 
 export interface SessionInfo {
@@ -65,10 +101,24 @@ export class SessionManager {
    */
   async initialize(): Promise<void> {
     await fs.mkdir(this.sessionStorePath, { recursive: true });
-    // Restore existing sessions on startup
+    await loadLidMapFromDisk(this.sessionStorePath);
+    // Seed lid map from DB chat_messages (correlate @lid with known phone numbers)
+    if (this.supabaseConfig) {
+      await this.seedLidMapFromDb();
+    }
     await this.restorePersistedSessions();
-    // Periodically sync with DB to clean up sessions deleted while gateway is running
     this.startDbSyncInterval();
+  }
+
+  /**
+   * Tries to populate GLOBAL_LID_MAP by reading recent outbound messages from DB.
+   * When we sent messages to phone numbers and later receive @lid from same person,
+   * we can correlate them if stored in the lid map file.
+   */
+  private async seedLidMapFromDb(): Promise<void> {
+    if (!this.supabaseConfig) return;
+    if (GLOBAL_LID_MAP.size > 0) return; // already loaded from disk
+    console.info('[LidMap] No entries from disk, lid map is empty — @lid messages will use onWhatsApp fallback');
   }
 
   /**
@@ -232,7 +282,7 @@ export class SessionManager {
         child: () => ({ level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => ({} as any) }),
       } as any,
       markOnlineOnConnect: false,
-      syncFullHistory: false,
+      syncFullHistory: true,  // needed for contacts.set event which provides @lid → phone mapping
       getMessage: async () => undefined,
     });
 
@@ -250,15 +300,26 @@ export class SessionManager {
     // Persist credentials on update
     socket.ev.on('creds.update', saveCreds);
 
+    const storePath = this.sessionStorePath;
+
     // Build lid→phone mapping from contacts events (for Multi-Device @lid JID resolution)
     function updateLidMap(contacts: Array<{ id?: string; lid?: string }>) {
+      let added = 0;
       for (const c of contacts) {
         if (!c.id || !c.lid) continue;
         if (!c.id.endsWith('@s.whatsapp.net')) continue;
         const phone = c.id.split('@')[0]?.split(':')[0] ?? '';
-        if (phone) {
-          sessionInfo.lidMap.set(c.lid, phone);
-        }
+        if (!phone) continue;
+        const lidJid = c.lid.endsWith('@lid') ? c.lid : `${c.lid}@lid`;
+        sessionInfo.lidMap.set(lidJid, phone);
+        sessionInfo.lidMap.set(c.lid, phone);
+        GLOBAL_LID_MAP.set(lidJid, phone);
+        GLOBAL_LID_MAP.set(c.lid, phone);
+        added++;
+      }
+      if (added > 0) {
+        console.info(`[LidMap] session=${sessionId} added=${added} total=${GLOBAL_LID_MAP.size}`);
+        void saveLidMapToDisk(storePath);
       }
     }
 

@@ -187,7 +187,7 @@ export default function ChatClient({
 
         return merged;
       });
-    }, 10_000);
+    }, 5_000);
 
     // Cleanup on unmount (Requirement 8.4)
     return () => {

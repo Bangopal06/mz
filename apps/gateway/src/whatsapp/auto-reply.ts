@@ -51,19 +51,20 @@ export async function saveChatMessage(
   messageId: string,
   messageText: string | null,
   messageType: 'text' | 'image',
-  mediaUrl: string | null
+  mediaUrl: string | null,
+  direction: 'inbound' | 'outbound' = 'inbound'
 ): Promise<void> {
   const normalizedNumber = normalizeWaNumber(waNumber);
 
   const payload = {
     wa_session_id: sessionDbId,
     contact_wa_number: normalizedNumber,
-    direction: 'inbound',
+    direction,
     message_type: messageType,
     body: messageText,
     media_url: mediaUrl,
     wa_message_id: messageId,
-    status: 'received',
+    status: direction === 'outbound' ? 'sent' : 'received',
   };
 
   const res = await fetch(`${cfg.url}/rest/v1/chat_messages`, {
