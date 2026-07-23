@@ -9,7 +9,14 @@
 CREATE OR REPLACE FUNCTION delete_wa_sync_contacts_on_session_delete()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- Delete broadcast_recipients referencing these contacts first
+  -- Delete message_logs referencing these contacts first
+  DELETE FROM message_logs
+  WHERE contact_id IN (
+    SELECT id FROM contacts
+    WHERE source = 'wa_sync' AND source_session_id = OLD.id
+  );
+
+  -- Delete broadcast_recipients referencing these contacts
   DELETE FROM broadcast_recipients
   WHERE contact_id IN (
     SELECT id FROM contacts
