@@ -240,6 +240,11 @@ export async function sessionRoutes(
     let session = app.sessionManager.getSession(id);
     if (!session) {
       session = await app.sessionManager.createSession(id, dbId);
+    } else if (session.status === 'disconnected') {
+      // Session stuck in disconnected — delete and recreate so Baileys generates a fresh QR
+      console.info(`[QR Route] Session '${id}' is disconnected, recreating for fresh QR`);
+      await app.sessionManager.deleteSession(id, false); // false = allow reconnect
+      session = await app.sessionManager.createSession(id, dbId);
     } else if (dbId && !session.dbId) {
       // Attach DB UUID if it wasn't set during restore
       session.dbId = dbId;
