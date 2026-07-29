@@ -6,8 +6,8 @@ import QRCodeDisplay from './QRCodeDisplay';
 type QRStatus = 'loading' | 'waiting' | 'connected' | 'error';
 
 interface QRModalProps {
-  sessionId: string;      // session_key for gateway
-  sessionDbId: string;    // UUID for DB update
+  sessionId: string;
+  sessionDbId: string;
   sessionLabel: string;
   onClose: () => void;
   onConnected?: () => void;
@@ -17,62 +17,37 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
   const [qrString, setQrString] = useState<string | null>(null);
   const [qrStatus, setQrStatus] = useState<QRStatus>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const closedRef = useRef(false);
-  const connectedRef = useRef(false);
   const [retryCount, setRetryCount] = useState(0);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    closedRef.current = false;
-    connectedRef.current = false;
-    const controller = new AbortController();
+    mountedRef.current = true;
 
     async function updateDbConnected() {
       try {
         const { createClient } = await import('@/src/lib/supabase/client');
         const supabase = createClient();
-        await supabase
-          .from('wa_sessions')
+        await supabase.from('wa_sessions')
           .update({ status: 'connected', updated_at: new Date().toISOString() })
           .eq('id', sessionDbId);
       } catch { /* ignore */ }
     }
 
-    async function handleConnectedEvent() {
-      if (connectedRef.current) return;
-      connectedRef.current = true;
-      setQrStatus('connected');
-      controller.abort();
-      await updateDbConnected();
-      onConnected?.();
-      setTimeout(onClose, 2000);
-    }
-
-    // Poll gateway status every 2s as fallback
-    const pollInterval = setInterval(async () => {
-      if (connectedRef.current || closedRef.current) {
-        clearInterval(pollInterval);
-        return;
-      }
+    async function startQR() {
       try {
-        const res = await fetch(`/api/gateway/sessions/${encodeURIComponent(sessionId)}/status`);
-        if (!res.ok) return;
-        const data = await res.json() as { status: string };
-        if (data.status === 'connected') {
-          clearInterval(pollInterval);
-          await handleConnectedEvent();
-        }
-      } catch { /* ignore */ }
-    }, 2000);
+        const url = `/api/gateway/sessions/${encodeURIComponent(sessionId)}/qr?dbId=${encodeURIComponent(sessionDbId)}`;
+        const res = await fetch(url, { headers: { Accept: 'text/event-stream' } });
 
-    async function connectSSE() {
-      try {
-        const res = await fetch(
-          `/api/gateway/sessions/${encodeURIComponent(sessionId)}/qr?dbId=${encodeURIComponent(sessionDbId)}`,
-          { signal: controller.signal, headers: { Accept: 'text/event-stream' } }
-        );
+        if (!mountedRef.current) return;
 
         if (!res.ok || !res.body) {
-          if (!closedRef.current) { setQrStatus('error'); setErrorMessage('Gagal terhubung ke gateway.'); }
+          const text = await res.text().catch(() => '');
+          setQrStatus('error');
+          if (text.includes('Unauthorized') || res.status === 401) {
+            setErrorMessage('Sesi login berakhir. Silakan logout dan login ulang.');
+          } else {
+            setErrorMessage(`Gagal terhubung ke gateway (HTTP ${res.status}).`);
+          }
           return;
         }
 
@@ -80,7 +55,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
         const decoder = new TextDecoder();
         let buffer = '';
 
-        while (!closedRef.current && !connectedRef.current) {
+        while (mountedRef.current) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -89,6 +64,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
           buffer = parts.pop() ?? '';
 
           for (const chunk of parts) {
+            if (!mountedRef.current) break;
             let eventType = 'message';
             let data = '';
             for (const line of chunk.split('\n')) {
@@ -98,65 +74,49 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
             if (!data) continue;
             try {
               const payload = JSON.parse(data) as Record<string, string>;
-              if (eventType === 'qr' || payload['qr']) {
+              if (payload['qr'] || eventType === 'qr') {
                 setQrString(payload['qr'] ?? '');
                 setQrStatus('waiting');
               } else if (payload['status'] === 'connected' || (eventType === 'done' && payload['status'] === 'connected')) {
                 reader.releaseLock();
-                clearInterval(pollInterval);
-                await handleConnectedEvent();
+                setQrStatus('connected');
+                await updateDbConnected();
+                onConnected?.();
+                setTimeout(onClose, 2000);
                 return;
               } else if (payload['error']) {
-                const errCode = payload['error'] as string;
-                let msg = `Error: ${errCode}`;
-                if (errCode === 'GATEWAY_UNREACHABLE') {
-                  msg = 'Tidak dapat terhubung ke WhatsApp Gateway. Pastikan gateway sedang berjalan.';
-                } else if (errCode === 'GATEWAY_ERROR') {
-                  const status = payload['status'];
-                  const detail = payload['detail'];
-                  if (status === 404) {
-                    msg = `Sesi tidak ditemukan di gateway. Coba buat sesi baru.`;
-                  } else {
-                    msg = `Gateway error (${status ?? errCode})${detail ? ': ' + String(detail).slice(0, 100) : ''}.`;
-                  }
-                }
+                let msg = `Error: ${payload['error']}`;
+                if (payload['error'] === 'GATEWAY_UNREACHABLE') msg = 'Gateway tidak dapat dijangkau.';
+                else if (payload['error'] === 'Unauthorized') msg = 'Sesi login berakhir. Logout dan login ulang.';
                 setQrStatus('error');
                 setErrorMessage(msg);
                 reader.releaseLock();
                 return;
               }
-              // Ignore 'disconnected' during pairing — Baileys sometimes briefly disconnects before reconnecting
-            } catch { /* ignore */ }
+            } catch { /* ignore JSON parse errors */ }
           }
         }
         try { reader.releaseLock(); } catch { /* ignore */ }
-      } catch (err: unknown) {
-        const isAbort = err instanceof Error && err.name === 'AbortError';
-        if (!isAbort && !closedRef.current && !connectedRef.current) {
-          setQrStatus('error');
-          setErrorMessage('Koneksi ke gateway terputus.');
-        }
+      } catch (err) {
+        if (!mountedRef.current) return;
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        setQrStatus('error');
+        setErrorMessage(`Koneksi gagal: ${msg}`);
       }
     }
 
-    connectSSE();
+    startQR();
 
-    return () => {
-      closedRef.current = true;
-      clearInterval(pollInterval);
-      controller.abort();
-    };
+    return () => { mountedRef.current = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, retryCount]);
-
-  function handleClose() { closedRef.current = true; onClose(); }
+  }, [sessionId, sessionDbId, retryCount]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" role="dialog" aria-modal="true" aria-labelledby="qr-modal-title">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" role="dialog" aria-modal="true">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 id="qr-modal-title" className="text-base font-semibold text-gray-900">Scan QR Code</h2>
-          <button onClick={handleClose} className="text-gray-400 hover:text-gray-600" aria-label="Tutup modal">
+          <h2 className="text-base font-semibold text-gray-900">Scan QR Code</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -219,20 +179,13 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
         <div className="flex gap-2 pt-1">
           {qrStatus === 'error' && (
             <button
-              onClick={() => {
-                closedRef.current = false;
-                connectedRef.current = false;
-                setQrString(null);
-                setErrorMessage(null);
-                setQrStatus('loading');
-                setRetryCount((c) => c + 1);
-              }}
+              onClick={() => { setQrString(null); setErrorMessage(null); setQrStatus('loading'); setRetryCount(c => c + 1); }}
               className="flex-1 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
             >
               Coba Lagi
             </button>
           )}
-          <button onClick={handleClose} className="flex-1 px-4 py-2 text-sm border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50">
+          <button onClick={onClose} className="flex-1 px-4 py-2 text-sm border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50">
             {qrStatus === 'connected' ? 'Tutup' : 'Batal'}
           </button>
         </div>
