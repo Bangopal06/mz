@@ -11,9 +11,10 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  // Auth check via getUser (more reliable than getSession for SSE)
   const supabase = await createClient();
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
     return new Response('data: {"error":"Unauthorized"}\n\n', {
       status: 200,
       headers: { 'Content-Type': 'text/event-stream' },
