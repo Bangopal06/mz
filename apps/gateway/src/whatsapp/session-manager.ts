@@ -427,11 +427,17 @@ export class SessionManager {
           }
         }, delay);
       } else if (!shouldReconnect) {
-        // Logged out — delete creds so next QR request starts fresh pairing
-        this.sessions.delete(sessionId);
-        const sessionDir = path.join(this.sessionStorePath, sessionId);
-        await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
-        console.info(`[SessionManager] Session '${sessionId}' logged out — deleted creds for fresh pairing`);
+        if (statusCode === DisconnectReason.loggedOut) {
+          // Truly logged out — delete creds so next QR request starts fresh pairing
+          this.sessions.delete(sessionId);
+          const sessionDir = path.join(this.sessionStorePath, sessionId);
+          await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+          console.info(`[SessionManager] Session '${sessionId}' logged out — deleted creds for fresh pairing`);
+        } else {
+          // 405 or other — just mark disconnected, keep creds, let user retry manually
+          console.info(`[SessionManager] Session '${sessionId}' stopped (code=${statusCode}) — keeping creds`);
+          this.sessions.delete(sessionId);
+        }
       }
     }
   }
