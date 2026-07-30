@@ -402,7 +402,8 @@ export class SessionManager {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const errorMsg = (lastDisconnect?.error as Error)?.message ?? '';
       console.info(`[SessionManager] Session '${sessionId}' closed: statusCode=${statusCode} error=${errorMsg}`);
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+        && statusCode !== 405; // 405 = WA rate limit / connection refused — don't spam reconnect
 
       session.status = 'disconnected';
       this.notifyStatus(sessionId, 'disconnected');
