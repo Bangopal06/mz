@@ -282,8 +282,9 @@ export class SessionManager {
         child: () => ({ level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, child: () => ({} as any) }),
       } as any,
       markOnlineOnConnect: false,
-      syncFullHistory: true,  // needed for contacts.set event which provides @lid → phone mapping
+      syncFullHistory: true,
       getMessage: async () => undefined,
+      browser: ['WA Broadcast CRM', 'Chrome', '124.0.6367.82'] as [string, string, string],
     });
 
     const sessionInfo: SessionInfo = {
