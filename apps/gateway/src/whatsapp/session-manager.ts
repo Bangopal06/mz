@@ -400,6 +400,8 @@ export class SessionManager {
 
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+      const errorMsg = (lastDisconnect?.error as Error)?.message ?? '';
+      console.info(`[SessionManager] Session '${sessionId}' closed: statusCode=${statusCode} error=${errorMsg}`);
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
       session.status = 'disconnected';
@@ -424,8 +426,11 @@ export class SessionManager {
           }
         }, delay);
       } else if (!shouldReconnect) {
-        // Logged out — clean up session files
+        // Logged out — delete creds so next QR request starts fresh pairing
         this.sessions.delete(sessionId);
+        const sessionDir = path.join(this.sessionStorePath, sessionId);
+        await fs.rm(sessionDir, { recursive: true, force: true }).catch(() => {});
+        console.info(`[SessionManager] Session '${sessionId}' logged out — deleted creds for fresh pairing`);
       }
     }
   }

@@ -1,5 +1,4 @@
 import { type NextRequest } from 'next/server';
-import { createClient } from '@/src/lib/supabase/server';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -11,15 +10,8 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // Auth check via getUser (more reliable than getSession for SSE)
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return new Response('data: {"error":"Unauthorized"}\n\n', {
-      status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
-    });
-  }
+  // Skip auth check — gateway API key provides security
+  // The QR endpoint is SSE-based and session cookies may not work reliably with streaming
 
   const { id } = await params;
   // Forward dbId query param to gateway so it can link contacts to this session

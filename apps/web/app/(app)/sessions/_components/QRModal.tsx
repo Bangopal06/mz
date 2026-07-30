@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import QRCodeDisplay from './QRCodeDisplay';
 
 type QRStatus = 'loading' | 'waiting' | 'connected' | 'error';
@@ -18,10 +18,9 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
   const [qrStatus, setQrStatus] = useState<QRStatus>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
-  const mountedRef = useRef(true);
 
   useEffect(() => {
-    mountedRef.current = true;
+    let active = true; // local variable, not a ref — not affected by Strict Mode double-invoke
 
     async function updateDbConnected() {
       try {
@@ -38,7 +37,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
         const url = `/api/gateway/sessions/${encodeURIComponent(sessionId)}/qr?dbId=${encodeURIComponent(sessionDbId)}`;
         const res = await fetch(url, { headers: { Accept: 'text/event-stream' } });
 
-        if (!mountedRef.current) return;
+        if (!active) return;
 
         if (!res.ok || !res.body) {
           const text = await res.text().catch(() => '');
@@ -55,7 +54,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
         const decoder = new TextDecoder();
         let buffer = '';
 
-        while (mountedRef.current) {
+        while (active) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -64,7 +63,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
           buffer = parts.pop() ?? '';
 
           for (const chunk of parts) {
-            if (!mountedRef.current) break;
+            if (!active) break;
             let eventType = 'message';
             let data = '';
             for (const line of chunk.split('\n')) {
@@ -98,7 +97,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
         }
         try { reader.releaseLock(); } catch { /* ignore */ }
       } catch (err) {
-        if (!mountedRef.current) return;
+        if (!active) return;
         const msg = err instanceof Error ? err.message : 'Unknown error';
         setQrStatus('error');
         setErrorMessage(`Koneksi gagal: ${msg}`);
@@ -107,7 +106,7 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
 
     startQR();
 
-    return () => { mountedRef.current = false; };
+    return () => { active = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, sessionDbId, retryCount]);
 
