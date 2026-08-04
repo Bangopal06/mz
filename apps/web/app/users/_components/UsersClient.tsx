@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { createClient } from '@/src/lib/supabase/client';
 import { UserTable, type UserRow, type UserRole } from './UserTable';
 import { CreateUserModal, type CreateUserFormData } from './CreateUserModal';
+import { EditUserModal } from './EditUserModal';
 
 interface UsersClientProps {
   initialUsers: UserRow[];
@@ -54,6 +55,9 @@ export function UsersClient({ initialUsers, currentUserId }: UsersClientProps) {
   const [users, setUsers] = useState<UserRow[]>(initialUsers);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [errorDialog, setErrorDialog] = useState<string | null>(null);
+  const [editTarget, setEditTarget] = useState<UserRow | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   const refreshUsers = useCallback(() => {
     router.refresh();
@@ -141,6 +145,29 @@ export function UsersClient({ initialUsers, currentUserId }: UsersClientProps) {
     setUsers((prev) => [...prev, newUser]);
   }
 
+  async function handleEditUser(userId: string, fields: { email?: string; password?: string; full_name?: string }) {
+    setEditLoading(true);
+    setEditError(null);
+    try {
+      const res = await fetch(`/api/admin/users/${userId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(err.error ?? `Gagal menyimpan (${res.status})`);
+      }
+      const updated = await res.json() as UserRow;
+      setUsers((prev) => prev.map((u) => u.id === userId ? { ...u, ...updated } : u));
+      setEditTarget(null);
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Terjadi kesalahan');
+    } finally {
+      setEditLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-8">
       {/* Error Dialog */}
@@ -195,6 +222,7 @@ export function UsersClient({ initialUsers, currentUserId }: UsersClientProps) {
         onRoleChange={handleRoleChange}
         onToggleActive={handleToggleActive}
         onDelete={handleDelete}
+        onEdit={(user) => { setEditTarget(user); setEditError(null); }}
       />
 
       {/* Create User Modal */}
@@ -203,6 +231,17 @@ export function UsersClient({ initialUsers, currentUserId }: UsersClientProps) {
         onClose={() => setIsModalOpen(false)}
         onSubmit={handleCreateUser}
       />
+
+      {/* Edit User Modal */}
+      {editTarget && (
+        <EditUserModal
+          user={editTarget}
+          loading={editLoading}
+          error={editError}
+          onClose={() => { setEditTarget(null); setEditError(null); }}
+          onSubmit={(fields) => handleEditUser(editTarget.id, fields)}
+        />
+      )}
 
       {/* Permission Matrix */}
       <div className="mt-10">

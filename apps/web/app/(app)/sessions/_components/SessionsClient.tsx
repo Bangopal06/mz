@@ -85,7 +85,14 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
         }
       )
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    // Fallback poll every 3s in case realtime is not enabled for wa_sessions
+    const poll = setInterval(async () => {
+      const { data } = await supabase.from('wa_sessions').select('id, session_key, phone_number, display_name, status, last_active_at, expires_at, created_at');
+      if (data) setSessions(data as WASession[]);
+    }, 3000);
+
+    return () => { supabase.removeChannel(channel); clearInterval(poll); };
   }, []);
 
   async function handleCreateSession() {
@@ -304,12 +311,34 @@ export default function SessionsClient({ initialSessions }: { initialSessions: W
           sessionLabel={qrTarget.label}
           onClose={() => setQrTarget(null)}
           onConnected={() => {
-            // Force update session status in local state immediately
+            // Optimistically mark as connected immediately
             setSessions((prev) =>
               prev.map((s) =>
                 s.id === qrTarget.sessionDbId ? { ...s, status: 'connected' } : s
               )
             );
+            // Then fetch fresh data (phone_number, display_name) from DB
+            const dbId = qrTarget.sessionDbId;
+            const fetchFresh = async () => {
+              const { createClient } = await import('@/src/lib/supabase/client');
+              const supabase = createClient();
+              // Retry a few times to give gateway time to write phone/display_name to DB
+              for (let i = 0; i < 5; i++) {
+                await new Promise(r => setTimeout(r, 1500));
+                const { data } = await supabase
+                  .from('wa_sessions')
+                  .select('id, session_key, phone_number, display_name, status, last_active_at, expires_at, created_at')
+                  .eq('id', dbId)
+                  .single();
+                if (data) {
+                  setSessions((prev) =>
+                    prev.map((s) => s.id === dbId ? (data as WASession) : s)
+                  );
+                  if (data.phone_number || data.display_name) break;
+                }
+              }
+            };
+            void fetchFresh();
           }}
         />
       )}

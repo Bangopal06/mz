@@ -115,15 +115,21 @@ export async function sessionRoutes(
       if (rawJidAll.endsWith('@lid')) {
         const sessionInfo2 = app.sessionManager.getSession(sessionId);
         // Check session lidMap first, then fall back to GLOBAL_LID_MAP (persisted across restarts)
-        const phone = sessionInfo2?.lidMap.get(rawJidAll) ?? GLOBAL_LID_MAP.get(rawJidAll);
+        let phone = sessionInfo2?.lidMap.get(rawJidAll) ?? GLOBAL_LID_MAP.get(rawJidAll);
+
+        // If not found yet, wait briefly for contacts.upsert to populate the map (startup race)
+        if (!phone) {
+          await new Promise(r => setTimeout(r, 2000));
+          phone = sessionInfo2?.lidMap.get(rawJidAll) ?? GLOBAL_LID_MAP.get(rawJidAll);
+        }
+
         if (phone) {
           resolvedJid = `${phone}@s.whatsapp.net`;
         } else {
+          // @lid not in contact list — try onWhatsApp and fetchContactInfo
           try {
             const lid = rawJidAll.replace('@lid', '');
-            console.log(`[LID] Trying onWhatsApp for lid=${lid}`);
             const results = await sessionInfo2?.socket.onWhatsApp(lid) ?? [];
-            console.log(`[LID] onWhatsApp results for ${lid}:`, JSON.stringify(results));
             const resolved = results.find(r => r.exists && r.jid?.endsWith('@s.whatsapp.net'));
             if (resolved?.jid) {
               resolvedJid = resolved.jid.replace(/:\d+@/, '@');
@@ -133,14 +139,19 @@ export async function sessionRoutes(
               void saveLidMapToDisk(config.sessionStorePath);
               console.log(`[LID] Resolved via onWhatsApp: ${rawJidAll} → ${resolvedJid}`);
             } else {
-              console.log(`[LID] onWhatsApp found no match for ${lid}`);
-              continue;
+              // onWhatsApp failed — use the @lid JID directly so message is not silently dropped
+              // The contact_wa_number will be the lid number, displayed as-is in UI
+              // This is better than dropping the message entirely
+              resolvedJid = rawJidAll; // keep full @lid JID — auto-reply won't work but message is saved
+              console.warn(`[LID] Using raw @lid for ${rawJidAll} — message will be saved but sender unidentified`);
             }
           } catch (err) {
             console.log(`[LID] onWhatsApp error for ${rawJidAll}:`, (err as Error).message);
-            continue;
+            resolvedJid = rawJidAll;
           }
         }
+        // Skip if previously marked unresolvable (in-memory only, not persisted)
+        if (resolvedJid === '__unresolvable__@s.whatsapp.net') continue;
       } else {
         resolvedJid = rawJidAll.includes(':') && rawJidAll.endsWith('@s.whatsapp.net')
           ? rawJidAll.replace(/:\d+@/, '@')
@@ -236,47 +247,20 @@ export async function sessionRoutes(
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
-    // Ensure session exists (creates it if necessary)
-    let session = app.sessionManager.getSession(id);
-    if (!session) {
-      session = await app.sessionManager.createSession(id, dbId);
-    } else if (session.status === 'disconnected') {
-      // Session stuck in disconnected — delete and recreate so Baileys generates a fresh QR
-      console.info(`[QR Route] Session '${id}' is disconnected, recreating for fresh QR`);
-      await app.sessionManager.deleteSession(id, false); // false = allow reconnect
-      session = await app.sessionManager.createSession(id, dbId);
-    } else if (dbId && !session.dbId) {
-      // Attach DB UUID if it wasn't set during restore
-      session.dbId = dbId;
-    }
-
-    // If already connected, send one status event and close immediately
-    if (session.status === 'connected') {
-      sendEvent('status', { session_id: id, status: 'connected' });
-      sendEvent('done', { session_id: id, status: 'connected' });
-      res.end();
-      return;
-    }
-
-    // If there's already a QR code queued, send it right away
-    const existingQr = app.sessionManager.getQrCode(id);
-    if (existingQr) {
-      sendEvent('qr', { session_id: id, qr: existingQr });
-    }
-
     let finished = false;
+    let timeoutHandle: ReturnType<typeof setTimeout>;
 
     const finish = (status: string): void => {
       if (finished) return;
       finished = true;
       clearTimeout(timeoutHandle);
-      // Restore global handlers
       app.sessionManager.setEventHandlers({ ...baseHandlers() });
       sendEvent('done', { session_id: id, status });
       res.end();
     };
 
-    // Override event handlers for the duration of this SSE connection
+    // Register SSE event handlers BEFORE creating/recreating the session to avoid
+    // a race condition where Baileys emits the QR event before the handler is set.
     app.sessionManager.setEventHandlers({
       ...baseHandlers(),
       onStatusChange: (sessionId, status) => {
@@ -293,7 +277,41 @@ export async function sessionRoutes(
       },
     });
 
-    const timeoutHandle = setTimeout(() => {
+    // Ensure session exists (creates it if necessary)
+    let session = app.sessionManager.getSession(id);
+    if (!session) {
+      session = await app.sessionManager.createSession(id, dbId);
+    } else if (session.status === 'disconnected') {
+      // Session stuck in disconnected — delete and recreate so Baileys generates a fresh QR
+      console.info(`[QR Route] Session '${id}' is disconnected, recreating for fresh QR`);
+      await app.sessionManager.deleteSession(id, false); // false = allow reconnect
+      session = await app.sessionManager.createSession(id, dbId);
+    } else if (session.status === 'pairing' && !session.qrCode) {
+      // Session is pairing but QR has expired — Baileys won't emit a new QR without restart
+      console.info(`[QR Route] Session '${id}' is pairing but QR expired, recreating for fresh QR`);
+      await app.sessionManager.deleteSession(id, false);
+      session = await app.sessionManager.createSession(id, dbId);
+    } else if (dbId && !session.dbId) {
+      // Attach DB UUID if it wasn't set during restore
+      session.dbId = dbId;
+    }
+
+    // If already connected, close SSE immediately
+    if (session.status === 'connected') {
+      app.sessionManager.setEventHandlers({ ...baseHandlers() });
+      sendEvent('status', { session_id: id, status: 'connected' });
+      sendEvent('done', { session_id: id, status: 'connected' });
+      res.end();
+      return;
+    }
+
+    // If there's already a cached QR (session was already in pairing state), send it now
+    const existingQr = app.sessionManager.getQrCode(id);
+    if (existingQr) {
+      sendEvent('qr', { session_id: id, qr: existingQr });
+    }
+
+    timeoutHandle = setTimeout(() => {
       if (!finished) {
         finished = true;
         sendEvent('done', { session_id: id, status: 'timeout' });

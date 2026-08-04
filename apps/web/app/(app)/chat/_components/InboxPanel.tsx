@@ -10,7 +10,9 @@ interface InboxPanelProps {
   activeContact: string | null;
   selectedSessionId: string | null;
   sessions: WaSessionRow[];
+  unreadCounts: Record<string, number>;
   onSelectContact: (contact: ConversationSummary) => void;
+  onSessionChange: (sessionId: string | null) => void;
 }
 
 interface ContactRow {
@@ -23,7 +25,9 @@ export default function InboxPanel({
   activeContact,
   selectedSessionId,
   sessions,
+  unreadCounts,
   onSelectContact,
+  onSessionChange,
 }: InboxPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNewChat, setShowNewChat] = useState(false);
@@ -107,6 +111,40 @@ export default function InboxPanel({
             </svg>
           </button>
         </div>
+
+        {/* Session tabs — only shown when there are multiple sessions */}
+        {sessions.length > 1 && (
+          <div className="flex gap-1 mb-2 overflow-x-auto pb-0.5 scrollbar-none">
+            <button
+              onClick={() => onSessionChange(null)}
+              className={`flex-shrink-0 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                selectedSessionId === null
+                  ? 'bg-green-500 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              Semua
+            </button>
+            {sessions.map((s) => {
+              const label = s.display_name ?? s.phone_number ?? s.session_key;
+              const isSelected = selectedSessionId === s.id;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => onSessionChange(s.id)}
+                  className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                    isSelected
+                      ? 'bg-green-500 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${s.status === 'connected' ? (isSelected ? 'bg-white' : 'bg-green-500') : 'bg-gray-400'}`} />
+                  <span className="truncate max-w-[80px]">{label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="relative">
           <input
             type="text"
@@ -145,6 +183,7 @@ export default function InboxPanel({
               const displayName = conv.contact_name ?? conv.contact_wa_number;
               const preview = truncatePreview(conv.last_message_body, conv.last_message_type);
               const time = formatMessageTime(conv.last_message_at);
+              const unread = unreadCounts[conv.contact_wa_number] ?? 0;
 
               return (
                 <li key={`${conv.wa_session_id}-${conv.contact_wa_number}`}>
@@ -155,8 +194,8 @@ export default function InboxPanel({
                     }`}
                   >
                     {/* Avatar */}
-                    <div className="flex-shrink-0 w-10 h-10 bg-gray-200 rounded-full flex items-center justify-center">
-                      <span className="text-sm font-semibold text-gray-600">
+                    <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${unread > 0 && !isActive ? 'bg-green-100' : 'bg-gray-200'}`}>
+                      <span className={`text-sm font-semibold ${unread > 0 && !isActive ? 'text-green-700' : 'text-gray-600'}`}>
                         {displayName.charAt(0).toUpperCase()}
                       </span>
                     </div>
@@ -164,35 +203,47 @@ export default function InboxPanel({
                     {/* Content */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
-                        <span className={`text-sm font-medium truncate ${isActive ? 'text-green-700' : 'text-gray-900'}`}>
+                        <span className={`text-sm truncate ${isActive ? 'text-green-700 font-medium' : unread > 0 ? 'text-gray-900 font-semibold' : 'text-gray-900 font-medium'}`}>
                           {displayName}
                         </span>
-                        <span className="text-xs text-gray-400 flex-shrink-0">{time}</span>
+                        <span className={`text-xs flex-shrink-0 ${unread > 0 && !isActive ? 'text-green-600 font-medium' : 'text-gray-400'}`}>
+                          {time}
+                        </span>
                       </div>
-                      <div className="flex items-center gap-1 mt-0.5">
-                        {/* Camera icon for image messages (Requirement 4.3) */}
-                        {conv.last_message_type === 'image' && (
-                          <svg
-                            className="w-3.5 h-3.5 text-gray-400 flex-shrink-0"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
-                            />
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              strokeWidth={2}
-                              d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
-                            />
-                          </svg>
+                      <div className="flex items-center justify-between gap-1 mt-0.5">
+                        <div className="flex items-center gap-1 min-w-0">
+                          {/* Camera icon for image messages (Requirement 4.3) */}
+                          {conv.last_message_type === 'image' && (
+                            <svg
+                              className="w-3.5 h-3.5 text-gray-400 flex-shrink-0"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"
+                              />
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth={2}
+                                d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"
+                              />
+                            </svg>
+                          )}
+                          <span className={`text-xs truncate ${unread > 0 && !isActive ? 'text-gray-700' : 'text-gray-500'}`}>
+                            {preview}
+                          </span>
+                        </div>
+                        {/* Unread badge */}
+                        {unread > 0 && !isActive && (
+                          <span className="flex-shrink-0 min-w-[20px] h-5 bg-green-500 text-white text-xs font-bold rounded-full flex items-center justify-center px-1.5">
+                            {unread > 99 ? '99+' : unread}
+                          </span>
                         )}
-                        <span className="text-xs text-gray-500 truncate">{preview}</span>
                       </div>
                     </div>
                   </button>

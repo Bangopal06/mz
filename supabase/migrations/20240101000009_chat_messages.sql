@@ -52,3 +52,6 @@ CREATE POLICY "service_role_write_chat_messages"
     TO service_role
     USING (true)
     WITH CHECK (true);
+
+-- Enable Realtime untuk chat_messages (untuk notifikasi unread di sidebar)
+ALTER PUBLICATION supabase_realtime ADD TABLE chat_messages;

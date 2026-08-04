@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import QRCodeDisplay from './QRCodeDisplay';
 
 type QRStatus = 'loading' | 'waiting' | 'connected' | 'error';
@@ -18,19 +18,56 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
   const [qrStatus, setQrStatus] = useState<QRStatus>('loading');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const connectedRef = useRef(false);
 
+  // Shared handler: called from either SSE or DB poll when session is confirmed connected
+  async function handleConnected() {
+    if (connectedRef.current) return;
+    connectedRef.current = true;
+
+    try {
+      const { createClient } = await import('@/src/lib/supabase/client');
+      const supabase = createClient();
+      await supabase
+        .from('wa_sessions')
+        .update({ status: 'connected', updated_at: new Date().toISOString() })
+        .eq('id', sessionDbId);
+    } catch { /* ignore */ }
+
+    setQrStatus('connected');
+    await new Promise(r => setTimeout(r, 500));
+    onConnected?.();
+    setTimeout(onClose, 2000);
+  }
+
+  // Independent DB polling — fallback when SSE event doesn't arrive
   useEffect(() => {
-    let active = true; // local variable, not a ref — not affected by Strict Mode double-invoke
+    connectedRef.current = false;
+    let stopped = false;
 
-    async function updateDbConnected() {
+    const poll = setInterval(async () => {
+      if (stopped || connectedRef.current) return;
       try {
         const { createClient } = await import('@/src/lib/supabase/client');
         const supabase = createClient();
-        await supabase.from('wa_sessions')
-          .update({ status: 'connected', updated_at: new Date().toISOString() })
-          .eq('id', sessionDbId);
+        const { data } = await supabase
+          .from('wa_sessions')
+          .select('status')
+          .eq('id', sessionDbId)
+          .single();
+        if (data?.status === 'connected' && !connectedRef.current) {
+          void handleConnected();
+        }
       } catch { /* ignore */ }
-    }
+    }, 2000); // poll every 2 seconds
+
+    return () => { stopped = true; clearInterval(poll); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionDbId, retryCount]);
+
+  // SSE stream from gateway
+  useEffect(() => {
+    let active = true;
 
     async function startQR() {
       try {
@@ -76,12 +113,13 @@ export default function QRModal({ sessionId, sessionDbId, sessionLabel, onClose,
               if (payload['qr'] || eventType === 'qr') {
                 setQrString(payload['qr'] ?? '');
                 setQrStatus('waiting');
-              } else if (payload['status'] === 'connected' || (eventType === 'done' && payload['status'] === 'connected')) {
+              } else if (
+                payload['status'] === 'connected' ||
+                (eventType === 'done' && payload['status'] === 'connected') ||
+                (eventType === 'status' && payload['status'] === 'connected')
+              ) {
                 reader.releaseLock();
-                setQrStatus('connected');
-                await updateDbConnected();
-                onConnected?.();
-                setTimeout(onClose, 2000);
+                void handleConnected();
                 return;
               } else if (payload['error']) {
                 let msg = `Error: ${payload['error']}`;

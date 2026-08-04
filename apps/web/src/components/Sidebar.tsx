@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/src/hooks/useAuth';
@@ -148,11 +148,47 @@ export default function Sidebar() {
   const router = useRouter();
   const { user } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [unreadTotal, setUnreadTotal] = useState(0);
+  // Track whether user is currently on the chat page
+  const isChatPage = pathname.startsWith('/chat');
+  const isChatPageRef = useRef(isChatPage);
+  isChatPageRef.current = isChatPage;
 
-  // Notify when a WA session expires
+  // Reset unread count when user navigates to chat
+  useEffect(() => {
+    if (isChatPage) {
+      setUnreadTotal(0);
+      try { localStorage.setItem('chat_unread_counts', '{}'); } catch { /* ignore */ }
+    }
+  }, [isChatPage]);
+
+  // Listen for localStorage changes and sync on mount
+  useEffect(() => {
+    // Clear stale unread counts on mount — only count new messages from this session
+    try { localStorage.setItem('chat_unread_counts', '{}'); } catch { /* ignore */ }
+
+    function syncFromStorage() {
+      if (isChatPageRef.current) return;
+      try {
+        const stored = localStorage.getItem('chat_unread_counts');
+        if (!stored) return;
+        const counts = JSON.parse(stored) as Record<string, number>;
+        setUnreadTotal(Object.values(counts).reduce((sum, n) => sum + n, 0));
+      } catch { /* ignore */ }
+    }
+    // Sync immediately on mount
+    syncFromStorage();
+    window.addEventListener('storage', syncFromStorage);
+    const interval = setInterval(syncFromStorage, 2000);
+    return () => { window.removeEventListener('storage', syncFromStorage); clearInterval(interval); };
+  }, []);
+
+  // Notify when a WA session expires; also track unread chat messages
   useEffect(() => {
     const supabase = createClient();
-    const channel = supabase
+
+    // Session status notifications
+    const sessionChannel = supabase
       .channel('sidebar_session_watch')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'wa_sessions' }, (payload) => {
         const updated = payload.new as { status: string; display_name?: string; session_key?: string };
@@ -163,7 +199,34 @@ export default function Sidebar() {
         }
       })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    // Unread badge: count inbound messages while not on chat page
+    // Uses Realtime only — polling removed to prevent double counting
+    const chatChannel = supabase
+      .channel('sidebar_chat_unread')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'chat_messages' },
+        (payload) => {
+          const msg = payload.new as { direction: string; contact_wa_number?: string };
+          if (msg.direction === 'inbound' && !isChatPageRef.current) {
+            setUnreadTotal((n) => n + 1);
+            try {
+              const stored = localStorage.getItem('chat_unread_counts') ?? '{}';
+              const counts = JSON.parse(stored) as Record<string, number>;
+              const key = msg.contact_wa_number ?? '__unknown__';
+              counts[key] = (counts[key] ?? 0) + 1;
+              localStorage.setItem('chat_unread_counts', JSON.stringify(counts));
+            } catch { /* ignore */ }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(sessionChannel);
+      supabase.removeChannel(chatChannel);
+    };
   }, []);
 
   const visibleItems = navItems.filter(
@@ -192,6 +255,8 @@ export default function Sidebar() {
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
         {visibleItems.map((item) => {
           const isActive = pathname === item.href || (item.href !== '/dashboard' && pathname.startsWith(item.href));
+          const isChatItem = item.href === '/chat';
+          const showBadge = isChatItem && unreadTotal > 0 && !isActive;
           return (
             <Link
               key={item.href}
@@ -203,8 +268,20 @@ export default function Sidebar() {
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
               }`}
             >
-              <span className={isActive ? 'text-green-600' : 'text-gray-400'}>{item.icon}</span>
+              <span className={`relative ${isActive ? 'text-green-600' : 'text-gray-400'}`}>
+                {item.icon}
+                {showBadge && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 bg-green-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1 leading-none">
+                    {unreadTotal > 99 ? '99+' : unreadTotal}
+                  </span>
+                )}
+              </span>
               {item.label}
+              {showBadge && (
+                <span className="ml-auto min-w-[20px] h-5 bg-green-500 text-white text-xs font-bold rounded-full flex items-center justify-center px-1.5">
+                  {unreadTotal > 99 ? '99+' : unreadTotal}
+                </span>
+              )}
             </Link>
           );
         })}

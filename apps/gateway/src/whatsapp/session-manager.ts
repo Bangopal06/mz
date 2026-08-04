@@ -381,7 +381,6 @@ export class SessionManager {
       session.reconnectAttempts = 0;
       session.lastActiveAt = new Date();
 
-      // Extract phone number and display name from socket user info
       const user = session.socket.user;
       if (user) {
         session.phoneNumber = user.id?.split(':')[0];
@@ -390,6 +389,28 @@ export class SessionManager {
 
       this.notifyStatus(sessionId, 'connected');
       this.eventHandlers.onConnected?.(sessionId, session.socket);
+
+      // Update DB status directly (don't rely only on webhook)
+      if (this.supabaseConfig && session.dbId) {
+        void fetch(
+          `${this.supabaseConfig.url}/rest/v1/wa_sessions?id=eq.${encodeURIComponent(session.dbId)}`,
+          {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              apikey: this.supabaseConfig.serviceRoleKey,
+              Authorization: `Bearer ${this.supabaseConfig.serviceRoleKey}`,
+              Prefer: 'return=minimal',
+            },
+            body: JSON.stringify({
+              status: 'connected',
+              phone_number: session.phoneNumber ?? null,
+              display_name: session.displayName ?? null,
+              updated_at: new Date().toISOString(),
+            }),
+          }
+        ).catch(err => console.warn('[SessionManager] Failed to update DB on connect:', err));
+      }
 
       // Trigger initial contact sync from socket.store (if available)
       // contacts.upsert event may come later with more contacts

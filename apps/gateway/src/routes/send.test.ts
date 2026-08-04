@@ -142,13 +142,13 @@ describe('POST /send — validation', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('returns 400 for invalid session_id (not a UUID)', async () => {
+  it('returns 400 for empty session_id', async () => {
     const res = await app.inject({
       method: 'POST',
       url: '/send',
       headers: AUTH_HEADERS,
       payload: JSON.stringify({
-        session_id: 'not-a-uuid',
+        session_id: '',
         to: VALID_TO,
         message: VALID_MESSAGE,
       }),

@@ -80,6 +80,20 @@ export async function saveChatMessage(
     const text = await res.text().catch(() => '');
     throw new Error(`Failed to save chat message: ${res.status} ${text}`);
   }
+
+  // Update last_active_at on the session — fire-and-forget
+  const now = new Date();
+  fetch(`${cfg.url}/rest/v1/wa_sessions?id=eq.${encodeURIComponent(sessionDbId)}`, {
+    method: 'PATCH',
+    headers: {
+      ...supabaseHeaders(cfg.serviceRoleKey),
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({
+      last_active_at: now.toISOString(),
+      updated_at: now.toISOString(),
+    }),
+  }).catch(() => {});
 }
 
 /**
@@ -143,18 +157,19 @@ export async function handleIncomingMessage(
   sessionDbId?: string,
   rawMessage?: unknown
 ): Promise<void> {
-  // Extract clean number: strip @s.whatsapp.net, juga handle format multi-device "number:deviceId@..."
+  // Extract clean number: strip @s.whatsapp.net or @lid suffix
+  // For @lid JIDs, use the lid number as identifier (e.g. "14379701547106")
   const rawNumber = from.split('@')[0]?.split(':')[0] ?? '';
-  const waNumber = rawNumber.replace(/[^0-9]/g, '');
+  const isLid = from.endsWith('@lid');
+  // For @lid: keep the number as-is (it's a Facebook internal ID, not a phone)
+  // For normal JIDs: strip non-digits
+  const waNumber = isLid ? rawNumber : rawNumber.replace(/[^0-9]/g, '');
 
   // Skip messages from groups
   if (!waNumber || from.endsWith('@g.us')) return;
 
-  // Skip @lid JIDs — these are Facebook internal IDs, not phone numbers
-  if (from.endsWith('@lid')) return;
-
   // Skip messages from self (outgoing)
-  if (from.includes(':')) return;
+  if (!isLid && from.includes(':')) return;
 
   // Save inbound message to chat_messages BEFORE auto-reply (Requirement 2.1)
   // Resolve sessionDbId: use provided dbId, or fetch from DB by session_key

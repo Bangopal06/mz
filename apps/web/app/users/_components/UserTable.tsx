@@ -19,6 +19,7 @@ interface UserTableProps {
   onRoleChange: (userId: string, newRole: UserRole) => Promise<void>;
   onToggleActive: (userId: string, currentlyActive: boolean) => Promise<void>;
   onDelete: (userId: string) => Promise<void>;
+  onEdit: (user: UserRow) => void;
 }
 
 const ROLE_LABELS: Record<UserRole, string> = {
@@ -43,6 +44,7 @@ export function UserTable({
   onRoleChange,
   onToggleActive,
   onDelete,
+  onEdit,
 }: UserTableProps) {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
 
@@ -181,6 +183,16 @@ export function UserTable({
                 {/* Aksi */}
                 <td className="px-4 py-3 text-right">
                   <div className="flex items-center justify-end gap-2">
+                    {/* Edit email/password */}
+                    <button
+                      type="button"
+                      disabled={isAnyPending}
+                      onClick={() => onEdit(user)}
+                      className="text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-blue-400 border-blue-200 text-blue-600 hover:bg-blue-50"
+                    >
+                      Edit
+                    </button>
+
                     {/* Toggle Active / Inactive */}
                     <button
                       type="button"

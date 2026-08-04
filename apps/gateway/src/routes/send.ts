@@ -5,7 +5,7 @@ import type { AppConfig } from '../config/index.js';
 
 const SendMessageSchema = z.object({
   session_id: z.string().min(1),
-  to: z.string().regex(/^[0-9]{8,20}$/, 'Invalid WA number format'),
+  to: z.string().regex(/^62[0-9]{7,18}$/, 'Invalid WA number format — must start with 62'),
   message: z.string().min(1).optional(),
   media: z
     .object({
@@ -220,7 +220,10 @@ export async function sendRoutes(app: FastifyInstance, options: SendRoutesOption
     }
 
     // ── 4. Update session activity (fire-and-forget, Requirement 8.5) ─────────
-    void updateSessionActivity(config.supabase.url, config.supabase.serviceRoleKey, session_id);
+    // Use dbId (UUID) if available, otherwise skip — session_key is not a UUID
+    if (sessionInfo.dbId) {
+      void updateSessionActivity(config.supabase.url, config.supabase.serviceRoleKey, sessionInfo.dbId);
+    }
 
     // ── 6. Return ACK ─────────────────────────────────────────────────────────
     const messageId = sentMessage?.key?.id ?? crypto.randomUUID();
